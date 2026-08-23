@@ -1,6 +1,6 @@
 # Architecture
 
-The Rust workspace begins with `crates/hephaestus-core/`, which owns Laws and domain contracts, and `crates/hephaestus-ledger/`, which owns canonical evidence persistence. Other planes will be added only after their invariants have executable evidence.
+The Rust workspace begins with `crates/hephaestus-core/`, which owns Laws and domain contracts, `crates/hephaestus-ledger/`, which owns canonical evidence persistence, and `crates/hephaestus-genome/`, which compiles immutable Genomes and Worlds. Other planes will be added only after their invariants have executable evidence.
 
 ```mermaid
 flowchart TD
@@ -19,15 +19,22 @@ flowchart TD
     Event --> CAS[BLAKE3 artifact CAS]
     SQLite --> Replay[Verified replay]
     CAS --> Replay
+    Source[Versioned JSON or YAML] --> Compile[Fail-closed compiler]
+    CAS --> Compile
+    Vocabulary --> Compile
+    Compile --> World[Content-addressed World]
+    World --> Genome[Content-addressed Genome]
+    Genome --> Derive
 ```
 
 ## Trust boundary
 
-The authority, domain, event-store, and artifact-store modules are production-critical. `checks/checks.json` sets a 95% per-module coverage floor and defines deliberate source mutations for each implemented invariant. The mutation ratchet may only increase.
+The authority, domain, compiler, Genome, World, event-store, and artifact-store modules are production-critical. `checks/checks.json` sets a 95% per-module coverage floor and defines deliberate source mutations for each implemented invariant. The mutation ratchet may only increase.
 
 ## Repository map
 
 - `crates/hephaestus-core/` — shared trust primitives.
+- `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.
 - `checks/` — coverage, mutation, and documentation gates.
 - `.github/workflows/ci.yml` — deterministic and adversarial CI jobs.

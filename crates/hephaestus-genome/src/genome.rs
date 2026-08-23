@@ -1,0 +1,155 @@
+use std::collections::BTreeMap;
+
+use hephaestus_core::authority::CapabilitySet;
+use hephaestus_ledger::{ArtifactId, ArtifactStore, LedgerError};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    CompileError, CompiledWorld, SourceFormat,
+    compiler::{canonical_json, content_id, parse_versioned, require_text},
+};
+
+/// Immutable normalized Genome produced by the compiler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledGenome {
+    id: String,
+    canonical_json: Vec<u8>,
+    name: String,
+    parents: Vec<String>,
+    authority: CapabilitySet,
+}
+
+impl CompiledGenome {
+    /// Returns the content-derived Genome identity.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the exact normalized JSON hashed by the identity.
+    #[must_use]
+    pub fn canonical_json(&self) -> &[u8] {
+        &self.canonical_json
+    }
+
+    /// Returns the human-readable stable Genome name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns sorted declared parent identities.
+    #[must_use]
+    pub fn parents(&self) -> &[String] {
+        &self.parents
+    }
+
+    /// Returns the compiled authority set.
+    #[must_use]
+    pub const fn authority(&self) -> CapabilitySet {
+        self.authority
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawGenome {
+    schema_version: u16,
+    name: String,
+    parents: Vec<String>,
+    model: ModelSpec,
+    authority: RawAuthority,
+    artifacts: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSpec {
+    provider: String,
+    family: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAuthority {
+    pub(crate) workspace_write: bool,
+    pub(crate) network: bool,
+}
+
+impl RawAuthority {
+    pub(crate) const fn capabilities(self) -> CapabilitySet {
+        CapabilitySet::new(self.workspace_write, self.network)
+    }
+}
+
+/// Compiles JSON or YAML into an immutable content-addressed Genome.
+///
+/// # Errors
+///
+/// Fails closed for invalid schemas, unresolved ancestry or artifacts, and authority
+/// wider than the World or any declared parent.
+pub fn compile_genome(
+    source: &str,
+    format: SourceFormat,
+    world: &CompiledWorld,
+    parents: &BTreeMap<String, CompiledGenome>,
+    artifact_store: &ArtifactStore,
+) -> Result<CompiledGenome, CompileError> {
+    let mut raw: RawGenome = parse_versioned(source, format)?;
+    require_text(&raw.name, "name")?;
+    require_text(&raw.model.provider, "model.provider")?;
+    require_text(&raw.model.family, "model.family")?;
+    raw.parents.sort();
+    raw.parents.dedup();
+
+    let requested = raw.authority.capabilities();
+    world
+        .authority_ceiling()
+        .derive_child(requested)
+        .map_err(|_| CompileError::AuthorityEscalation)?;
+    for parent_id in &raw.parents {
+        let parent = parents
+            .get(parent_id)
+            .ok_or_else(|| CompileError::UnresolvedParent(parent_id.clone()))?;
+        if parent.id() != parent_id {
+            return Err(CompileError::ParentIdentityMismatch {
+                declared: parent_id.clone(),
+                actual: parent.id().to_owned(),
+            });
+        }
+        parent
+            .authority()
+            .derive_child(requested)
+            .map_err(|_| CompileError::AuthorityEscalation)?;
+    }
+    resolve_artifacts(&raw.artifacts, artifact_store)?;
+
+    let canonical_json = canonical_json(&raw)?;
+    Ok(CompiledGenome {
+        id: content_id("genome", &canonical_json),
+        canonical_json,
+        name: raw.name,
+        parents: raw.parents,
+        authority: requested,
+    })
+}
+
+pub(crate) fn resolve_artifacts(
+    references: &BTreeMap<String, String>,
+    artifact_store: &ArtifactStore,
+) -> Result<(), CompileError> {
+    for (name, artifact) in references {
+        require_text(name, "artifact name")?;
+        let id = ArtifactId::parse(artifact.clone())
+            .map_err(|_| CompileError::InvalidArtifactId(artifact.clone()))?;
+        if let Err(error) = artifact_store.get(&id) {
+            return Err(match error {
+                LedgerError::Io(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+                    CompileError::UnresolvedArtifact(artifact.clone())
+                }
+                _ => CompileError::ArtifactIntegrity(artifact.clone()),
+            });
+        }
+    }
+    Ok(())
+}

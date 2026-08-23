@@ -1,0 +1,138 @@
+use std::collections::BTreeMap;
+
+use hephaestus_core::{authority::CapabilitySet, domain::MutationTarget};
+use hephaestus_ledger::ArtifactStore;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    CompileError, SourceFormat,
+    compiler::{canonical_json, content_id, parse_versioned, require_text},
+    genome::{RawAuthority, resolve_artifacts},
+};
+
+/// Immutable normalized World produced by the compiler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledWorld {
+    id: String,
+    canonical_json: Vec<u8>,
+    name: String,
+    authority_ceiling: CapabilitySet,
+}
+
+impl CompiledWorld {
+    /// Returns the content-derived World identity.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the exact normalized JSON hashed by the identity.
+    #[must_use]
+    pub fn canonical_json(&self) -> &[u8] {
+        &self.canonical_json
+    }
+
+    /// Returns the World's stable human-readable name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the maximum capability set any candidate may request.
+    #[must_use]
+    pub const fn authority_ceiling(&self) -> CapabilitySet {
+        self.authority_ceiling
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorld {
+    schema_version: u16,
+    name: String,
+    laws: RawLaws,
+    authority_ceiling: RawAuthority,
+    mutation_scope: Vec<MutationTarget>,
+    promotion: PromotionPolicy,
+    objectives: Vec<String>,
+    evaluator_artifacts: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawLaws {
+    candidate_network: bool,
+    candidate_evaluator_access: bool,
+    maximum_cost_microusd: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PromotionPolicy {
+    minimum_delta_bps: i64,
+    maximum_regressions: u32,
+    confidence_bps: u16,
+}
+
+/// Compiles JSON or YAML into an immutable content-addressed World.
+///
+/// # Errors
+///
+/// Fails closed for invalid schemas, evaluator access, protected mutation targets,
+/// unresolved evaluator artifacts, or invalid promotion policy.
+pub fn compile_world(
+    source: &str,
+    format: SourceFormat,
+    artifact_store: &ArtifactStore,
+) -> Result<CompiledWorld, CompileError> {
+    let mut raw: RawWorld = parse_versioned(source, format)?;
+    require_text(&raw.name, "name")?;
+    if raw.laws.candidate_evaluator_access {
+        return Err(CompileError::CandidateEvaluatorAccess);
+    }
+    for target in &raw.mutation_scope {
+        target
+            .authorize()
+            .map_err(|_| CompileError::ProtectedMutationTarget(*target))?;
+    }
+    if !(1..=10_000).contains(&raw.promotion.confidence_bps) {
+        return Err(CompileError::InvalidConfidence(
+            raw.promotion.confidence_bps,
+        ));
+    }
+    if raw.objectives.is_empty() {
+        return Err(CompileError::EmptyObjectives);
+    }
+    for objective in &raw.objectives {
+        require_text(objective, "objective")?;
+    }
+    raw.objectives.sort();
+    raw.objectives.dedup();
+    raw.mutation_scope.sort();
+    raw.mutation_scope.dedup();
+    resolve_artifacts(&raw.evaluator_artifacts, artifact_store)?;
+
+    let authority_ceiling = raw.authority_ceiling.capabilities();
+    let canonical_json = canonical_json(&raw)?;
+    Ok(CompiledWorld {
+        id: content_id("world", &canonical_json),
+        canonical_json,
+        name: raw.name,
+        authority_ceiling,
+    })
+}
+
+/// Rejects direct comparisons between different World identities.
+///
+/// # Errors
+///
+/// Returns [`CompileError::IncompatibleWorlds`] unless both identities match exactly.
+pub fn ensure_comparable(left: &CompiledWorld, right: &CompiledWorld) -> Result<(), CompileError> {
+    if left.id != right.id {
+        return Err(CompileError::IncompatibleWorlds {
+            left: left.id.clone(),
+            right: right.id.clone(),
+        });
+    }
+    Ok(())
+}

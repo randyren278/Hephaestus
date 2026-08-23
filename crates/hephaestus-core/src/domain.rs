@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The only domain schema version accepted by this release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,7 +163,8 @@ impl GenomeStatus {
 }
 
 /// Surfaces that a proposed mutation may attempt to change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MutationTarget {
     /// Evolvable prompts, tools, memory, context, topology, and runtime policy.
     Harness,

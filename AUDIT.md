@@ -4,7 +4,7 @@ Audit date: 2026-08-23
 Branch: **full-reign/2026-08-23**
 Baseline commit: `a48c4a5`
 
-## Executed evidence
+## Baseline evidence
 
 - `cargo test --workspace`: 2 behavior tests passed.
 - `cargo clippy --workspace --all-targets --all-features`: passed with all and pedantic lints denied.
@@ -13,7 +13,7 @@ Baseline commit: `a48c4a5`
 - `python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md`: passed.
 - GitHub Actions run `32648979874`: deterministic and mutation jobs passed on the remote.
 
-## Existing feature inventory
+## Baseline feature inventory
 
 | Feature | Wired | Works | Tested | Guarded | Documented | Verdict |
 |---|---|---|---|---|---|---|
@@ -26,11 +26,18 @@ Baseline commit: `a48c4a5`
 | GitHub Actions CI | Yes; push and pull-request triggers | Yes; run `32648979874` passed both jobs | Proven by a real hosted run | Enforces the mutation ratchet after deterministic checks | Yes | Keep |
 | Master plan | Linked from the README; it is a specification, not executable behavior | Internally coherent, but almost all described product behavior is unimplemented | No executable acceptance mapping before this roadmap | No | Self-documenting | Keep as product source; implementation claims must remain separate |
 
-## Missing product loop
+## Progress since baseline
 
-There is currently no daemon, CLI, TUI, database, event ledger, artifact store, Genome or World compiler, runtime adapter, sandbox, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
+- The domain vocabulary and lifecycle are executable, versioned, and fail closed.
+- The canonical SQLite event ledger and BLAKE3 artifact store persist and verify real on-disk state.
+- Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
+- Seven trust-critical modules are held to 95% coverage and 29 deliberate invariant mutations.
 
-The repository is therefore an honest trust-substrate baseline, not yet a runnable Hephaestus product. No dead application code or theatre product tests exist because application code has not been written.
+## Remaining product loop
+
+There is currently no daemon, CLI, TUI, runtime adapter, sandbox, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
+
+The repository is therefore an honest trust substrate with immutable compiled configuration, not yet a runnable Hephaestus product. No dead application code or theatre product tests exist because those application layers have not been written.
 
 ## Audit conclusion
 

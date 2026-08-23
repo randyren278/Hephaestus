@@ -5,6 +5,9 @@
   "critical_modules": [
     "crates/hephaestus-core/src/authority.rs",
     "crates/hephaestus-core/src/domain.rs",
+    "crates/hephaestus-genome/src/compiler.rs",
+    "crates/hephaestus-genome/src/genome.rs",
+    "crates/hephaestus-genome/src/world.rs",
     "crates/hephaestus-ledger/src/artifact_store.rs",
     "crates/hephaestus-ledger/src/event_store.rs"
   ],
@@ -120,6 +123,97 @@
       "invariant": "Artifact reads fail when bytes do not match the requested content address.",
       "find": "        if actual != *id {\n            return Err(LedgerError::ArtifactHashMismatch {\n                expected: id.as_str().to_owned(),\n                actual: actual.as_str().to_owned(),\n            });\n        }",
       "replace": "        if false && actual != *id {\n            return Err(LedgerError::ArtifactHashMismatch {\n                expected: id.as_str().to_owned(),\n                actual: actual.as_str().to_owned(),\n            });\n        }"
+    },
+    {
+      "id": "oversized-compiler-input-accepted",
+      "file": "crates/hephaestus-genome/src/compiler.rs",
+      "invariant": "Genome and World parsing is bounded before deserialization.",
+      "find": "    if source.len() > MAX_SOURCE_BYTES {\n        return Err(CompileError::InputTooLarge {\n            bytes: source.len(),\n            maximum: MAX_SOURCE_BYTES,\n        });\n    }",
+      "replace": "    if false && source.len() > MAX_SOURCE_BYTES {\n        return Err(CompileError::InputTooLarge {\n            bytes: source.len(),\n            maximum: MAX_SOURCE_BYTES,\n        });\n    }"
+    },
+    {
+      "id": "unknown-compiler-schema-accepted",
+      "file": "crates/hephaestus-genome/src/compiler.rs",
+      "invariant": "Genome and World compilers reject undeclared schema versions.",
+      "find": "    if version.schema_version != 1 {\n        return Err(CompileError::UnsupportedSchemaVersion(\n            version.schema_version,\n        ));\n    }",
+      "replace": "    if false && version.schema_version != 1 {\n        return Err(CompileError::UnsupportedSchemaVersion(\n            version.schema_version,\n        ));\n    }"
+    },
+    {
+      "id": "empty-compiler-field-accepted",
+      "file": "crates/hephaestus-genome/src/compiler.rs",
+      "invariant": "Required Genome and World text fields are non-empty.",
+      "find": "    if value.trim().is_empty() {\n        return Err(CompileError::EmptyField(field));\n    }",
+      "replace": "    if false && value.trim().is_empty() {\n        return Err(CompileError::EmptyField(field));\n    }"
+    },
+    {
+      "id": "compiler-content-address-collapsed",
+      "file": "crates/hephaestus-genome/src/compiler.rs",
+      "invariant": "Different canonical documents receive different content-derived identities absent a BLAKE3 collision.",
+      "find": "        blake3::hash(canonical).to_hex()",
+      "replace": "        blake3::hash(&[]).to_hex()"
+    },
+    {
+      "id": "world-authority-ceiling-ignored",
+      "file": "crates/hephaestus-genome/src/genome.rs",
+      "invariant": "A Genome cannot request authority wider than its World ceiling.",
+      "find": "    world\n        .authority_ceiling()\n        .derive_child(requested)\n        .map_err(|_| CompileError::AuthorityEscalation)?;",
+      "replace": "    world\n        .authority_ceiling()\n        .derive_child(requested)\n        .map_err(|_| CompileError::AuthorityEscalation)\n        .ok();"
+    },
+    {
+      "id": "parent-identity-spoof-accepted",
+      "file": "crates/hephaestus-genome/src/genome.rs",
+      "invariant": "Resolved parent lookup keys must equal the compiled parent content identity.",
+      "find": "        if parent.id() != parent_id {\n            return Err(CompileError::ParentIdentityMismatch {\n                declared: parent_id.clone(),\n                actual: parent.id().to_owned(),\n            });\n        }",
+      "replace": "        if false && parent.id() != parent_id {\n            return Err(CompileError::ParentIdentityMismatch {\n                declared: parent_id.clone(),\n                actual: parent.id().to_owned(),\n            });\n        }"
+    },
+    {
+      "id": "parent-authority-ceiling-ignored",
+      "file": "crates/hephaestus-genome/src/genome.rs",
+      "invariant": "A child Genome cannot regain authority absent from a parent.",
+      "find": "        parent\n            .authority()\n            .derive_child(requested)\n            .map_err(|_| CompileError::AuthorityEscalation)?;",
+      "replace": "        parent\n            .authority()\n            .derive_child(requested)\n            .map_err(|_| CompileError::AuthorityEscalation)\n            .ok();"
+    },
+    {
+      "id": "artifact-integrity-error-ignored",
+      "file": "crates/hephaestus-genome/src/genome.rs",
+      "invariant": "Compilation fails unless every referenced artifact resolves and verifies by content address.",
+      "find": "        if let Err(error) = artifact_store.get(&id) {",
+      "replace": "        if false && let Err(error) = artifact_store.get(&id) {"
+    },
+    {
+      "id": "candidate-evaluator-access-accepted",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "World compilation never grants candidates direct evaluator access.",
+      "find": "    if raw.laws.candidate_evaluator_access {\n        return Err(CompileError::CandidateEvaluatorAccess);\n    }",
+      "replace": "    if false && raw.laws.candidate_evaluator_access {\n        return Err(CompileError::CandidateEvaluatorAccess);\n    }"
+    },
+    {
+      "id": "protected-world-scope-accepted",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "World mutation scope excludes Laws and evaluators.",
+      "find": "    for target in &raw.mutation_scope {\n        target\n            .authorize()\n            .map_err(|_| CompileError::ProtectedMutationTarget(*target))?;\n    }",
+      "replace": "    for _target in &raw.mutation_scope {}"
+    },
+    {
+      "id": "invalid-promotion-confidence-accepted",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "Promotion confidence is a non-zero basis-point probability.",
+      "find": "    if !(1..=10_000).contains(&raw.promotion.confidence_bps) {\n        return Err(CompileError::InvalidConfidence(\n            raw.promotion.confidence_bps,\n        ));\n    }",
+      "replace": "    if false && !(1..=10_000).contains(&raw.promotion.confidence_bps) {\n        return Err(CompileError::InvalidConfidence(\n            raw.promotion.confidence_bps,\n        ));\n    }"
+    },
+    {
+      "id": "empty-world-objectives-accepted",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "Every World declares at least one evaluation objective.",
+      "find": "    if raw.objectives.is_empty() {\n        return Err(CompileError::EmptyObjectives);\n    }",
+      "replace": "    if false && raw.objectives.is_empty() {\n        return Err(CompileError::EmptyObjectives);\n    }"
+    },
+    {
+      "id": "incompatible-worlds-compared",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "Results can only be compared under the exact same World identity.",
+      "find": "    if left.id != right.id {\n        return Err(CompileError::IncompatibleWorlds {\n            left: left.id.clone(),\n            right: right.id.clone(),\n        });\n    }",
+      "replace": "    if false && left.id != right.id {\n        return Err(CompileError::IncompatibleWorlds {\n            left: left.id.clone(),\n            right: right.id.clone(),\n        });\n    }"
     }
   ]
 }
