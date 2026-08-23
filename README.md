@@ -11,7 +11,7 @@ flowchart LR
     Evidence --> Promotion[Deterministic promotion]
 ```
 
-The repository is currently establishing its trust substrate. The first implemented laws live in `crates/hephaestus-core/`: descendants cannot widen inherited capabilities, only a matching operator proof can clear a freeze, unknown schemas fail closed, Genome lifecycle transitions are explicit, and mutations cannot target Laws or evaluators. CI deliberately breaks each law and requires the test suite to detect the regression.
+The repository now has an executable constitution plus a durable evidence spine. `crates/hephaestus-core/` owns fail-closed authority and domain Laws. `crates/hephaestus-ledger/` owns a WAL-backed, hash-linked SQLite event stream and a BLAKE3 content-addressed artifact store. CI deliberately breaks each invariant and requires the suite to detect the regression.
 
 ## Development
 
@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
-python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 7
+python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 16
 python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md
 ```
 

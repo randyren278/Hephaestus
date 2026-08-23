@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/hephaestus-core"]
+members = ["crates/hephaestus-core", "crates/hephaestus-ledger"]
 resolver = "2"
 
 [workspace.package]

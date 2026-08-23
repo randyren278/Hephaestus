@@ -4,7 +4,9 @@
   "coverage_floor": 95.0,
   "critical_modules": [
     "crates/hephaestus-core/src/authority.rs",
-    "crates/hephaestus-core/src/domain.rs"
+    "crates/hephaestus-core/src/domain.rs",
+    "crates/hephaestus-ledger/src/artifact_store.rs",
+    "crates/hephaestus-ledger/src/event_store.rs"
   ],
   "mutations": [
     {
@@ -55,6 +57,69 @@
       "invariant": "A candidate mutation can never target an evaluator.",
       "find": "            Self::Law | Self::Evaluator => Err(DomainError::ProtectedMutationTarget(self)),",
       "replace": "            Self::Law => Err(DomainError::ProtectedMutationTarget(self)),\n            Self::Evaluator => Ok(()),"
+    },
+    {
+      "id": "duplicate-event-id-accepted",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "An event identifier can appear only once in canonical history.",
+      "find": "        if duplicate.is_some() {\n            return Err(LedgerError::DuplicateEventId(input.event_id));\n        }",
+      "replace": "        if false && duplicate.is_some() {\n            return Err(LedgerError::DuplicateEventId(input.event_id));\n        }"
+    },
+    {
+      "id": "empty-event-field-accepted",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "Required canonical event fields are never empty.",
+      "find": "        if value.trim().is_empty() {\n            return Err(LedgerError::EmptyEventField(name));\n        }",
+      "replace": "        if false && value.trim().is_empty() {\n            return Err(LedgerError::EmptyEventField(name));\n        }"
+    },
+    {
+      "id": "changed-ledger-head-accepted",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "The single writer never appends onto a database tail changed outside its verified state.",
+      "find": "        if load_tail(&transaction)? != self.verified_head {\n            return Err(LedgerError::LedgerHeadChanged);\n        }",
+      "replace": "        if false && load_tail(&transaction)? != self.verified_head {\n            return Err(LedgerError::LedgerHeadChanged);\n        }"
+    },
+    {
+      "id": "event-sequence-gap-accepted",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "Canonical event sequences are contiguous and globally monotonic.",
+      "find": "        if event.sequence != expected_sequence {\n            return Err(LedgerError::SequenceMismatch {\n                expected: expected_sequence,\n                actual: event.sequence,\n            });\n        }",
+      "replace": "        if false && event.sequence != expected_sequence {\n            return Err(LedgerError::SequenceMismatch {\n                expected: expected_sequence,\n                actual: event.sequence,\n            });\n        }"
+    },
+    {
+      "id": "event-chain-link-ignored",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "Every canonical event links to the verified hash of its immediate predecessor.",
+      "find": "        if event.previous_hash != expected_previous_hash {\n            return Err(LedgerError::PreviousHashMismatch {\n                sequence: event.sequence,\n            });\n        }",
+      "replace": "        if false && event.previous_hash != expected_previous_hash {\n            return Err(LedgerError::PreviousHashMismatch {\n                sequence: event.sequence,\n            });\n        }"
+    },
+    {
+      "id": "modified-event-content-accepted",
+      "file": "crates/hephaestus-ledger/src/event_store.rs",
+      "invariant": "Stored event content must reproduce its canonical BLAKE3 hash.",
+      "find": "        if hash_event(event.sequence, &input, &event.previous_hash) != event.hash {\n            return Err(LedgerError::EventHashMismatch {\n                sequence: event.sequence,\n            });\n        }",
+      "replace": "        if false\n            && hash_event(event.sequence, &input, &event.previous_hash) != event.hash\n        {\n            return Err(LedgerError::EventHashMismatch {\n                sequence: event.sequence,\n            });\n        }"
+    },
+    {
+      "id": "malformed-artifact-id-accepted",
+      "file": "crates/hephaestus-ledger/src/artifact_store.rs",
+      "invariant": "Artifact identifiers are canonical lowercase 64-character BLAKE3 hashes.",
+      "find": "        if value.len() != 64\n            || !value\n                .bytes()\n                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))\n        {\n            return Err(LedgerError::InvalidArtifactId(value));\n        }",
+      "replace": "        if false {\n            return Err(LedgerError::InvalidArtifactId(value));\n        }"
+    },
+    {
+      "id": "artifact-content-address-collapsed",
+      "file": "crates/hephaestus-ledger/src/artifact_store.rs",
+      "invariant": "Different artifact bytes receive different content-derived addresses absent a BLAKE3 collision.",
+      "find": "        Self(blake3::hash(bytes).to_hex().to_string())",
+      "replace": "        Self(blake3::hash(&[]).to_hex().to_string())"
+    },
+    {
+      "id": "artifact-substitution-accepted",
+      "file": "crates/hephaestus-ledger/src/artifact_store.rs",
+      "invariant": "Artifact reads fail when bytes do not match the requested content address.",
+      "find": "        if actual != *id {\n            return Err(LedgerError::ArtifactHashMismatch {\n                expected: id.as_str().to_owned(),\n                actual: actual.as_str().to_owned(),\n            });\n        }",
+      "replace": "        if false && actual != *id {\n            return Err(LedgerError::ArtifactHashMismatch {\n                expected: id.as_str().to_owned(),\n                actual: actual.as_str().to_owned(),\n            });\n        }"
     }
   ]
 }
