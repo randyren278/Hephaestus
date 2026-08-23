@@ -24,7 +24,7 @@ cargo test --workspace
 PYTHONPATH=python python3 -m unittest discover -s python/tests -v
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
-python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 106
+python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 111
 python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md
 ```
 

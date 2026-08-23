@@ -32,6 +32,8 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.estimate_bps, 6_250)
         self.assertEqual((first.lower_bps, first.upper_bps), (2_500, 10_000))
+        short_run = paired_bootstrap(values, seed=42, resamples=100)
+        self.assertEqual((short_run.lower_bps, short_run.upper_bps), (2_500, 8_750))
 
     def test_pareto_keeps_dimensions_separate(self) -> None:
         parent = FitnessVector(8_000, 9_000, 100, 100)

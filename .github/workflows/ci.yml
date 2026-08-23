@@ -53,7 +53,7 @@ jobs:
           python checks/docs_gate.py --root . --skip-claims --min-diagrams 1 README.md docs/ARCHITECTURE.md
 
   mutation:
-    name: Mutation guard (${{ matrix.crate }})
+    name: Mutation guard (${{ matrix.scope }})
     needs: deterministic
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -61,18 +61,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - crate: hephaestus-core
+          - scope: hephaestus-core
+            prefix: crates/hephaestus-core/
             minimum: 9
-          - crate: hephaestus-ledger
+          - scope: hephaestus-ledger
+            prefix: crates/hephaestus-ledger/
             minimum: 9
-          - crate: hephaestus-genome
+          - scope: hephaestus-genome
+            prefix: crates/hephaestus-genome/
             minimum: 13
-          - crate: hephaestus-control
+          - scope: hephaestus-control
+            prefix: crates/hephaestus-control/
             minimum: 17
-          - crate: hephaestus-runtime
+          - scope: hephaestus-runtime
+            prefix: crates/hephaestus-runtime/
             minimum: 24
-          - crate: hephaestus-experience
+          - scope: hephaestus-experience
+            prefix: crates/hephaestus-experience/
             minimum: 34
+          - scope: python-statistics
+            prefix: python/
+            minimum: 5
     steps:
       - uses: actions/checkout@v5
 
@@ -86,6 +95,6 @@ jobs:
         run: >-
           python checks/mutation_guard.py
           --manifest checks/checks.json
-          --file-prefix crates/${{ matrix.crate }}/
+          --file-prefix ${{ matrix.prefix }}
           --assert-min ${{ matrix.minimum }}
           --skip-baseline

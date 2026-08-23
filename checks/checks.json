@@ -6,7 +6,8 @@
     "crates/hephaestus-experience/": "cargo test -p hephaestus-experience --quiet",
     "crates/hephaestus-genome/": "cargo test -p hephaestus-genome --quiet",
     "crates/hephaestus-ledger/": "cargo test -p hephaestus-ledger --quiet",
-    "crates/hephaestus-runtime/": "cargo test -p hephaestus-runtime --quiet"
+    "crates/hephaestus-runtime/": "cargo test -p hephaestus-runtime --quiet",
+    "python/": "env PYTHONPATH=python python3 -m unittest discover -s python/tests -v"
   },
   "timeout_seconds": 120,
   "coverage_floor": 95.0,
@@ -773,6 +774,41 @@
       "invariant": "Failure to persist an interrupt error retains or terminates the still-active run.",
       "find": "            if let Err(evidence) = self.record_failure(provenance, \"interrupt\", &error, 1) {\n                return Err(self.contain_after_evidence_failure(run_id, evidence));\n            }",
       "replace": "            if let Err(evidence) = self.record_failure(provenance, \"interrupt\", &error, 1) {\n                return Err(evidence);\n            }"
+    },
+    {
+      "id": "statistics-pairing-discarded",
+      "file": "python/hephaestus_lab/statistics.py",
+      "invariant": "Selection statistics compare candidate and parent outcomes from the same trial.",
+      "find": "    deltas = [int(item.candidate_correct) - int(item.parent_correct) for item in outcomes]",
+      "replace": "    deltas = [int(item.candidate_correct) for item in outcomes]"
+    },
+    {
+      "id": "statistics-seed-ignored",
+      "file": "python/hephaestus_lab/statistics.py",
+      "invariant": "Bootstrap sampling is reproducibly controlled by the recorded seed.",
+      "find": "    generator = _SplitMix64(seed)",
+      "replace": "    generator = _SplitMix64(0)"
+    },
+    {
+      "id": "statistics-cost-regression-accepted",
+      "file": "python/hephaestus_lab/statistics.py",
+      "invariant": "A candidate with higher cost cannot Pareto-dominate its parent.",
+      "find": "        and candidate.cost_microusd <= parent.cost_microusd",
+      "replace": "        and candidate.cost_microusd >= parent.cost_microusd"
+    },
+    {
+      "id": "statistics-regression-gate-bypassed",
+      "file": "python/hephaestus_lab/statistics.py",
+      "invariant": "Promotion eligibility respects the World regression budget.",
+      "find": "        regressions <= policy.maximum_regressions",
+      "replace": "        True"
+    },
+    {
+      "id": "statistics-effect-gate-inverted",
+      "file": "python/hephaestus_lab/statistics.py",
+      "invariant": "Promotion requires the confidence interval to clear the minimum effect.",
+      "find": "        and interval.lower_bps > policy.minimum_delta_bps",
+      "replace": "        and interval.lower_bps < policy.minimum_delta_bps"
     }
   ]
 }
