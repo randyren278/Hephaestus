@@ -322,7 +322,10 @@ dependencies = [
 name = "hephaestus-experience"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "hephaestus-core",
  "hephaestus-ledger",
+ "hephaestus-runtime",
  "serde",
  "serde_json",
  "tempfile",

@@ -13,6 +13,8 @@ pub enum RuntimeError {
     CapabilityDenied,
     /// A requested provider or lifecycle action is unsupported.
     Unsupported(&'static str),
+    /// Required runtime evidence could not be persisted.
+    Evidence(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -25,9 +27,11 @@ impl Error for RuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::InvalidSpec(_) | Self::Git(_) | Self::CapabilityDenied | Self::Unsupported(_) => {
-                None
-            }
+            Self::InvalidSpec(_)
+            | Self::Git(_)
+            | Self::CapabilityDenied
+            | Self::Unsupported(_)
+            | Self::Evidence(_) => None,
         }
     }
 }

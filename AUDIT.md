@@ -33,15 +33,15 @@ Baseline commit: `a48c4a5`
 - Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
 - The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
 - The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths. A provider-neutral local process supervisor independently enforces allowlisted environments, stdin prompts, process-group interrupt, and hard wall/output limits. macOS hosted commands are wrapped in a live-tested deny-by-default Seatbelt policy; unsupported hosts fail closed. Hosted provider invocations are built but not executed without a billable permit.
-- The Experience Plane records the full observable trace vocabulary as bounded redacted CAS artifacts with safe ledger receipts. Structured observations, hypotheses, evidence, and contradictions require verified source events and exact run/Genome/World provenance; every lesson remains explicitly unverified and cannot become a Gene here.
-- Eighteen trust-critical modules are held to 95% coverage and 74 deliberate invariant mutations.
+- The Experience Plane records the full observable trace vocabulary as bounded redacted CAS artifacts with safe ledger receipts. `RecordedRuntime` binds real adapter lifecycle, checkpoints, failures, provider-visible events, latency, and known deterministic cost to immutable run/Genome/World provenance, failing closed when required start or resume evidence cannot persist. Structured observations, hypotheses, evidence, and contradictions require verified source events and exact provenance; every lesson remains explicitly unverified and cannot become a Gene here.
+- Nineteen trust-critical modules are held to 95% coverage and 84 deliberate invariant mutations.
 
 ## Remaining product loop
 
-There is currently no active hosted-provider adapter, TUI, runtime-to-Experience trace integration, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, validated Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
+There is currently no active hosted-provider adapter, TUI, provider-native tool/context/memory event parser, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, validated Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
 
 The repository is therefore an honest trust substrate with immutable compiled configuration, not yet a runnable Hephaestus product. No dead application code or theatre product tests exist because those application layers have not been written.
 
 ## Audit conclusion
 
-Keep every existing implementation feature. The immediate priority is to turn the Laws into a durable event-sourced kernel, then build one complete local evolution loop before adding population intelligence, distributed execution, or web surfaces.
+Keep every existing implementation feature. The immediate priority is a trustworthy local Arena and evaluator boundary, followed by one complete local evolution loop before population intelligence, distributed execution, or web surfaces.

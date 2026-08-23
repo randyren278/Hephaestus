@@ -7,6 +7,7 @@
     "crates/hephaestus-core/src/domain.rs",
     "crates/hephaestus-control/src/client.rs",
     "crates/hephaestus-control/src/server.rs",
+    "crates/hephaestus-experience/src/integration.rs",
     "crates/hephaestus-experience/src/record.rs",
     "crates/hephaestus-experience/src/recorder.rs",
     "crates/hephaestus-experience/src/redaction.rs",
@@ -540,6 +541,76 @@
       "invariant": "Raw experience remains unverified and cannot be represented as a Gene without Arena evidence.",
       "find": "            status: \"unverified\".to_owned(),",
       "replace": "            status: \"gene\".to_owned(),"
+    },
+    {
+      "id": "recorded-runtime-denial-misclassified",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Runtime capability denials remain distinguishable from generic adapter failures.",
+      "find": "        let kind = if matches!(error, RuntimeError::CapabilityDenied) {",
+      "replace": "        let kind = if false && matches!(error, RuntimeError::CapabilityDenied) {"
+    },
+    {
+      "id": "recorded-runtime-sequence-wraps",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Evidence event identity generation fails closed instead of wrapping its sequence.",
+      "find": "        self.sequence = self\n            .sequence\n            .checked_add(1)\n            .ok_or_else(|| RuntimeError::Evidence(\"evidence sequence overflow\".to_owned()))?;",
+      "replace": "        self.sequence = self.sequence.wrapping_add(1);"
+    },
+    {
+      "id": "recorded-runtime-start-evidence-optional",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "A successfully started runtime is interrupted and hidden if its required start evidence cannot persist.",
+      "find": "        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields) {\n            let _ignored = self.inner.interrupt(spec.run_id());\n            self.runs.remove(spec.run_id());\n            return Err(error);\n        }",
+      "replace": "        let _ignored_evidence = self.record(provenance, TraceKind::LifecycleStarted, fields);"
+    },
+    {
+      "id": "recorded-runtime-start-failure-unobserved",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Generic adapter start failures produce canonical error evidence.",
+      "find": "            Err(error) => {\n                self.record_failure(provenance, \"start\", &error)?;\n                return Err(error);\n            }",
+      "replace": "            Err(error) => return Err(error),"
+    },
+    {
+      "id": "recorded-runtime-raw-checkpoint-persisted",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Provider checkpoint secrets are represented only by a content hash in trace evidence.",
+      "find": "                blake3::hash(checkpoint.as_bytes()).to_hex().to_string(),",
+      "replace": "                checkpoint.to_owned(),"
+    },
+    {
+      "id": "recorded-runtime-resume-evidence-optional",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "A resumed runtime is interrupted and hidden when checkpoint evidence cannot persist.",
+      "find": "        ) {\n            let _ignored = self.inner.interrupt(spec.run_id());\n            self.runs.remove(spec.run_id());\n            return Err(error);\n        }\n        Ok(handle)\n    }",
+      "replace": "        ) {\n            return Err(error);\n        }\n        Ok(handle)\n    }"
+    },
+    {
+      "id": "recorded-runtime-interrupt-completion-omitted",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "An active interrupt emits exactly one canonical terminal lifecycle reason.",
+      "find": "        if !self.completed.contains(run_id) {\n            self.record(\n                provenance,\n                TraceKind::LifecycleCompleted,",
+      "replace": "        if false && !self.completed.contains(run_id) {\n            self.record(\n                provenance,\n                TraceKind::LifecycleCompleted,"
+    },
+    {
+      "id": "recorded-runtime-running-checkpoint-omitted",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Explicit running snapshots become provenance-bound checkpoint evidence.",
+      "find": "        if snapshot.status == hephaestus_runtime::RunStatus::Running {",
+      "replace": "        if false && snapshot.status == hephaestus_runtime::RunStatus::Running {"
+    },
+    {
+      "id": "recorded-runtime-terminal-duplicated",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Repeated terminal snapshots cannot duplicate completion or cost evidence.",
+      "find": "        } else if !self.completed.contains(run_id) {",
+      "replace": "        } else {"
+    },
+    {
+      "id": "recorded-runtime-zero-cost-unattributed",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Deterministic offline runs explicitly attribute their known zero provider cost.",
+      "find": "            if self.inner.provider() == Provider::Deterministic {",
+      "replace": "            if false && self.inner.provider() == Provider::Deterministic {"
     }
   ]
 }
