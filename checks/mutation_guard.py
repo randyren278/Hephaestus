@@ -166,6 +166,8 @@ def main(argv=None) -> int:
                              "CI where a prior job already proved it")
     parser.add_argument("--only", action="append", default=[],
                         help="run only this mutation ID; repeat for a focused local rerun")
+    parser.add_argument("--file-prefix", default=None,
+                        help="run only mutations whose source path starts with this prefix")
     args = parser.parse_args(argv)
 
     try:
@@ -179,6 +181,11 @@ def main(argv=None) -> int:
                 raise ManifestError(
                     "unknown mutation ID(s): " + ", ".join(sorted(unknown)))
             entries = [entry for entry in entries if entry["id"] in requested]
+        if args.file_prefix:
+            entries = [
+                entry for entry in entries
+                if entry["file"].startswith(args.file_prefix)
+            ]
     except ManifestError as error:
         print(f"MANIFEST ERROR: {error}", file=sys.stderr)
         return 1
