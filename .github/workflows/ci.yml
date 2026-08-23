@@ -45,9 +45,9 @@ jobs:
           --manifest checks/checks.json --report lcov.info
 
       - name: Documentation gate
-        run: >-
-          python checks/docs_gate.py --root . --min-diagrams 1
-          README.md docs/ARCHITECTURE.md
+        run: |
+          python checks/docs_gate.py --root . README.md AUDIT.md ROADMAP.md docs/*.md
+          python checks/docs_gate.py --root . --skip-claims --min-diagrams 1 README.md docs/ARCHITECTURE.md
 
   mutation:
     name: Mutation guard
@@ -67,4 +67,4 @@ jobs:
         run: >-
           python checks/mutation_guard.py
           --manifest checks/checks.json
-          --assert-min 2
+          --assert-min 7

@@ -3,7 +3,8 @@
   "timeout_seconds": 120,
   "coverage_floor": 95.0,
   "critical_modules": [
-    "crates/hephaestus-core/src/authority.rs"
+    "crates/hephaestus-core/src/authority.rs",
+    "crates/hephaestus-core/src/domain.rs"
   ],
   "mutations": [
     {
@@ -17,8 +18,43 @@
       "id": "candidate-clears-freeze",
       "file": "crates/hephaestus-core/src/authority.rs",
       "invariant": "Only an external operator can clear the evolution freeze.",
-      "find": "        if !matches!(actor, Actor::Operator) {\n            return Err(AuthorityError::OperatorRequired);\n        }",
-      "replace": "        if false && !matches!(actor, Actor::Operator) {\n            return Err(AuthorityError::OperatorRequired);\n        }"
+      "find": "        if !token_matches(&self.operator_token, &proof.0) {\n            return Err(AuthorityError::OperatorRequired);\n        }",
+      "replace": "        if false && !token_matches(&self.operator_token, &proof.0) {\n            return Err(AuthorityError::OperatorRequired);\n        }"
+    },
+    {
+      "id": "unknown-schema-version-accepted",
+      "file": "crates/hephaestus-core/src/domain.rs",
+      "invariant": "Unknown domain schema versions always fail closed.",
+      "find": "        if value == Self::V1 as u16 {\n            return Ok(Self::V1);\n        }",
+      "replace": "        if value == Self::V1 as u16 || value == 2 {\n            return Ok(Self::V1);\n        }"
+    },
+    {
+      "id": "empty-domain-id-accepted",
+      "file": "crates/hephaestus-core/src/domain.rs",
+      "invariant": "Canonical domain identifiers are never empty or whitespace-only.",
+      "find": "        if value.trim().is_empty() {\n            return Err(DomainError::EmptyIdentifier);\n        }",
+      "replace": "        if false && value.trim().is_empty() {\n            return Err(DomainError::EmptyIdentifier);\n        }"
+    },
+    {
+      "id": "terminal-genome-transition-accepted",
+      "file": "crates/hephaestus-core/src/domain.rs",
+      "invariant": "Genome lifecycle transitions not declared by the constitution are rejected.",
+      "find": "            _ => Err(DomainError::InvalidGenomeTransition {\n                current: self,\n                next,\n            }),",
+      "replace": "            _ => Ok(next),"
+    },
+    {
+      "id": "law-mutation-authorized",
+      "file": "crates/hephaestus-core/src/domain.rs",
+      "invariant": "A candidate mutation can never target a Law.",
+      "find": "            Self::Law | Self::Evaluator => Err(DomainError::ProtectedMutationTarget(self)),",
+      "replace": "            Self::Law => Ok(()),\n            Self::Evaluator => Err(DomainError::ProtectedMutationTarget(self)),"
+    },
+    {
+      "id": "evaluator-mutation-authorized",
+      "file": "crates/hephaestus-core/src/domain.rs",
+      "invariant": "A candidate mutation can never target an evaluator.",
+      "find": "            Self::Law | Self::Evaluator => Err(DomainError::ProtectedMutationTarget(self)),",
+      "replace": "            Self::Law => Err(DomainError::ProtectedMutationTarget(self)),\n            Self::Evaluator => Ok(()),"
     }
   ]
 }

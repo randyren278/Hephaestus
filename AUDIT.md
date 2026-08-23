@@ -1,7 +1,7 @@
 # Hephaestus Feature Audit
 
 Audit date: 2026-08-23
-Branch: `full-reign/2026-08-23`
+Branch: **full-reign/2026-08-23**
 Baseline commit: `a48c4a5`
 
 ## Executed evidence
