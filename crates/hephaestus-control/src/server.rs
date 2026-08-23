@@ -8,17 +8,25 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use fs2::FileExt;
-use hephaestus_core::authority::{FreezeState, OperatorToken};
+use hephaestus_core::authority::{CapabilitySet, FreezeState, OperatorToken};
+use hephaestus_experience::{
+    EvidenceRecorder, RecordedRuntime, RedactionPolicy, RetentionLimits, TraceKind, TraceReceipt,
+};
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
+use hephaestus_runtime::{
+    Budget, CapabilityToken, CompletionReason, DeterministicRuntime, RunSpec, RunStatus,
+    RuntimeAdapter, Sandbox, SandboxManager,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, GenomeRecord,
-    ResponseData,
+    ResponseData, RunCompletionReason, WorldRecord,
 };
 
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -44,13 +52,18 @@ pub fn data_dir_from_environment() -> Result<PathBuf, ControlError> {
 /// Single-writer daemon state and local operator API.
 pub struct ControlPlane {
     data_dir: PathBuf,
+    source_repository: PathBuf,
     token_hex: String,
     operator_token: OperatorToken,
-    ledger: EventStore,
+    storage: Option<CanonicalStorage>,
     state: ControlState,
-    _artifacts: ArtifactStore,
     _lock: File,
     shutdown_requested: bool,
+}
+
+struct CanonicalStorage {
+    ledger: EventStore,
+    artifacts: ArtifactStore,
 }
 
 impl ControlPlane {
@@ -61,7 +74,21 @@ impl ControlPlane {
     /// Fails closed for unsafe storage paths, another writer, corrupt tokens,
     /// ledger integrity failures, or invalid projection events.
     pub fn open(data_dir: impl Into<PathBuf>) -> Result<Self, ControlError> {
+        Self::open_with_repository(data_dir, env::current_dir()?)
+    }
+
+    /// Opens canonical storage with an explicit repository for isolated reference runs.
+    ///
+    /// # Errors
+    ///
+    /// In addition to [`Self::open`] failures, rejects a path that is not a Git
+    /// worktree. The canonicalized path is fixed for the daemon lifetime.
+    pub fn open_with_repository(
+        data_dir: impl Into<PathBuf>,
+        source_repository: impl Into<PathBuf>,
+    ) -> Result<Self, ControlError> {
         let data_dir = data_dir.into();
+        let source_repository = validate_source_repository(&source_repository.into())?;
         prepare_private_directory(&data_dir)?;
         let lock = take_writer_lock(&data_dir.join("daemon.lock"))?;
         let (token_hex, token_bytes) = load_or_create_token(&data_dir.join("operator.token"))?;
@@ -74,14 +101,14 @@ impl ControlPlane {
         let artifacts = ArtifactStore::open(artifacts_path)?;
         let history = ledger.replay_verified()?;
         let state = ControlState::from_events(&history, &operator_token)?;
-        state.verify_genome_artifacts(&artifacts)?;
+        state.verify_artifacts(&history, &artifacts)?;
         Ok(Self {
             data_dir,
+            source_repository,
             token_hex,
             operator_token,
-            ledger,
+            storage: Some(CanonicalStorage { ledger, artifacts }),
             state,
-            _artifacts: artifacts,
             _lock: lock,
             shutdown_requested: false,
         })
@@ -197,6 +224,11 @@ impl ControlPlane {
         {
             return Err(ExecuteError::Invalid("genome_id is required"));
         }
+        if let Command::RunReference { genome_id } = &command
+            && genome_id.trim().is_empty()
+        {
+            return Err(ExecuteError::Invalid("genome_id is required"));
+        }
 
         match command {
             Command::Status => Ok(self.state.status()),
@@ -215,6 +247,10 @@ impl ControlPlane {
                 .cloned()
                 .map(|genome| ResponseData::Genome { genome })
                 .ok_or(ExecuteError::NotFound),
+            Command::RunReference { genome_id } => {
+                let run_id = format!("reference-{}", self.state.event_count);
+                self.run_reference(&run_id, &genome_id)
+            }
             Command::Replay => self.replay_response(),
             Command::DaemonStop => {
                 self.shutdown_requested = true;
@@ -239,6 +275,9 @@ impl ControlPlane {
         .map_err(|_| ExecuteError::Internal)?;
         let next_sequence = self.state.event_count + 1;
         let event = self
+            .storage
+            .as_mut()
+            .ok_or(ExecuteError::Internal)?
             .ledger
             .append(EventInput::new(
                 format!("control:{next_sequence}:{request_id}"),
@@ -257,6 +296,9 @@ impl ControlPlane {
 
     fn replay_response(&self) -> Result<ResponseData, ExecuteError> {
         let history = self
+            .storage
+            .as_ref()
+            .ok_or(ExecuteError::Internal)?
             .ledger
             .replay_verified()
             .map_err(|_| ExecuteError::Internal)?;
@@ -274,6 +316,129 @@ impl ControlPlane {
             projection_hash: blake3::hash(&canonical).to_hex().to_string(),
         })
     }
+
+    fn run_reference(
+        &mut self,
+        run_id: &str,
+        genome_id: &str,
+    ) -> Result<ResponseData, ExecuteError> {
+        if self.state.freeze.is_frozen() {
+            return Err(ExecuteError::Invalid("evolution is frozen"));
+        }
+        let genome = self
+            .state
+            .genomes
+            .get(genome_id)
+            .cloned()
+            .ok_or(ExecuteError::NotFound)?;
+        if !self.state.worlds.contains_key(&genome.world_id) {
+            return Err(ExecuteError::Invalid("Genome World is not registered"));
+        }
+        let result = self.run_reference_inner(run_id, &genome);
+        self.refresh_projection()?;
+        result
+    }
+
+    fn run_reference_inner(
+        &mut self,
+        run_id: &str,
+        genome: &GenomeRecord,
+    ) -> Result<ResponseData, ExecuteError> {
+        let budget = Budget::new(Duration::from_secs(10), 1_048_576, 0)
+            .map_err(|_| ExecuteError::Internal)?;
+        let spec = RunSpec::new(
+            run_id,
+            &genome.genome_id,
+            &genome.world_id,
+            &self.source_repository,
+            "Inventory the isolated repository without modifying it or using the network.",
+            CapabilitySet::new(false, false),
+            budget,
+        )
+        .map_err(|_| ExecuteError::Invalid("run specification is invalid"))?;
+        let manager =
+            SandboxManager::open(self.data_dir.join("sandboxes"), Duration::from_secs(30))
+                .map_err(|_| ExecuteError::Internal)?;
+        let (sandbox, token) = manager.create(&spec).map_err(|_| ExecuteError::Internal)?;
+        let limits = RetentionLimits::new(10_000, 65_536).map_err(|_| ExecuteError::Internal)?;
+        let storage = self.storage.take().ok_or(ExecuteError::Internal)?;
+        let recorder = EvidenceRecorder::from_stores(
+            storage.ledger,
+            storage.artifacts,
+            RedactionPolicy::new([self.token_hex.clone()]),
+            limits,
+        );
+        let (execution, recorder) =
+            execute_reference_runtime(recorder, &spec, &sandbox, &token, run_id);
+        let (ledger, artifacts) = recorder.into_stores();
+        let execution = execution
+            .and_then(|output| persist_reference_output(&artifacts, run_id, genome, output));
+        self.storage = Some(CanonicalStorage { ledger, artifacts });
+        let cleanup = sandbox.cleanup().map_err(|_| ExecuteError::Internal);
+        cleanup?;
+        let response = execution?;
+        self.append_run_result(&response)?;
+        Ok(response)
+    }
+
+    fn append_run_result(&mut self, response: &ResponseData) -> Result<(), ExecuteError> {
+        let ResponseData::Run {
+            run_id,
+            genome_id,
+            world_id,
+            completion_reason,
+            latency_millis,
+            actual_cost_microusd,
+            stdout_artifact_id,
+            stderr_artifact_id,
+            trace_artifact_ids,
+        } = response
+        else {
+            return Err(ExecuteError::Internal);
+        };
+        let receipt = RunResultReceipt {
+            run_id,
+            genome_id,
+            world_id,
+            completion_reason: *completion_reason,
+            latency_millis: *latency_millis,
+            actual_cost_microusd: *actual_cost_microusd,
+            stdout_artifact_id,
+            stderr_artifact_id,
+            trace_artifact_ids,
+        };
+        let payload = serde_json::to_vec(&receipt).map_err(|_| ExecuteError::Internal)?;
+        let timestamp = timestamp_millis().map_err(|_| ExecuteError::Internal)?;
+        self.storage
+            .as_mut()
+            .ok_or(ExecuteError::Internal)?
+            .ledger
+            .append(EventInput::new(
+                format!("result:{run_id}"),
+                format!("run:{run_id}"),
+                "run.result_recorded",
+                "runtime-plane",
+                timestamp,
+                payload,
+            ))
+            .map_err(|_| ExecuteError::Internal)?;
+        Ok(())
+    }
+
+    fn refresh_projection(&mut self) -> Result<(), ExecuteError> {
+        let storage = self.storage.as_ref().ok_or(ExecuteError::Internal)?;
+        let history = storage
+            .ledger
+            .replay_verified()
+            .map_err(|_| ExecuteError::Internal)?;
+        let state = ControlState::from_events(&history, &self.operator_token)
+            .map_err(|_| ExecuteError::Internal)?;
+        state
+            .verify_artifacts(&history, &storage.artifacts)
+            .map_err(|_| ExecuteError::Internal)?;
+        self.state = state;
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -289,6 +454,33 @@ struct RecordedCommand {
     command: Command,
 }
 
+#[derive(Serialize)]
+struct RunResultReceipt<'a> {
+    run_id: &'a str,
+    genome_id: &'a str,
+    world_id: &'a str,
+    completion_reason: RunCompletionReason,
+    latency_millis: u64,
+    actual_cost_microusd: u64,
+    stdout_artifact_id: &'a str,
+    stderr_artifact_id: &'a str,
+    trace_artifact_ids: &'a [String],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnedRunResultReceipt {
+    run_id: String,
+    genome_id: String,
+    world_id: String,
+    completion_reason: RunCompletionReason,
+    latency_millis: u64,
+    actual_cost_microusd: u64,
+    stdout_artifact_id: String,
+    stderr_artifact_id: String,
+    trace_artifact_ids: Vec<String>,
+}
+
 #[derive(Debug)]
 enum ExecuteError {
     Invalid(&'static str),
@@ -296,10 +488,97 @@ enum ExecuteError {
     Internal,
 }
 
+struct ReferenceExecution {
+    completion_reason: RunCompletionReason,
+    latency_millis: u64,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    trace_artifact_ids: Vec<String>,
+}
+
+fn execute_reference_runtime(
+    recorder: EvidenceRecorder,
+    spec: &RunSpec,
+    sandbox: &Sandbox,
+    token: &CapabilityToken,
+    run_id: &str,
+) -> (Result<ReferenceExecution, ExecuteError>, EvidenceRecorder) {
+    let mut runtime =
+        match RecordedRuntime::new_recoverable(DeterministicRuntime::default(), recorder) {
+            Ok(runtime) => runtime,
+            Err(recovery) => {
+                let (_, _, recorder) = *recovery;
+                return (Err(ExecuteError::Internal), recorder);
+            }
+        };
+    let execution = (|| {
+        runtime
+            .start(spec, sandbox, token)
+            .map_err(|_| ExecuteError::Internal)?;
+        let snapshot = runtime
+            .snapshot(run_id)
+            .map_err(|_| ExecuteError::Internal)?;
+        if snapshot.status == RunStatus::Running {
+            return Err(ExecuteError::Internal);
+        }
+        let completion_reason = snapshot
+            .completion_reason
+            .ok_or(ExecuteError::Internal)
+            .map(run_completion_reason)?;
+        let latency_millis =
+            u64::try_from(snapshot.elapsed.as_millis()).map_err(|_| ExecuteError::Internal)?;
+        let stdout = fs::read(&snapshot.stdout_path).map_err(|_| ExecuteError::Internal)?;
+        let stderr = fs::read(&snapshot.stderr_path).map_err(|_| ExecuteError::Internal)?;
+        let history = runtime
+            .evidence()
+            .replay_verified()
+            .map_err(|_| ExecuteError::Internal)?;
+        Ok(ReferenceExecution {
+            completion_reason,
+            latency_millis,
+            stdout,
+            stderr,
+            trace_artifact_ids: trace_artifacts_for_run(&history, run_id)?,
+        })
+    })();
+    let (_, recorder) = runtime.into_parts();
+    (execution, recorder)
+}
+
+fn persist_reference_output(
+    artifacts: &ArtifactStore,
+    run_id: &str,
+    genome: &GenomeRecord,
+    output: ReferenceExecution,
+) -> Result<ResponseData, ExecuteError> {
+    let stdout_artifact_id = artifacts
+        .put(&output.stdout)
+        .map_err(|_| ExecuteError::Internal)?
+        .as_str()
+        .to_owned();
+    let stderr_artifact_id = artifacts
+        .put(&output.stderr)
+        .map_err(|_| ExecuteError::Internal)?
+        .as_str()
+        .to_owned();
+    Ok(ResponseData::Run {
+        run_id: run_id.to_owned(),
+        genome_id: genome.genome_id.clone(),
+        world_id: genome.world_id.clone(),
+        completion_reason: output.completion_reason,
+        latency_millis: output.latency_millis,
+        actual_cost_microusd: 0,
+        stdout_artifact_id,
+        stderr_artifact_id,
+        trace_artifact_ids: output.trace_artifact_ids,
+    })
+}
+
 struct ControlState {
     freeze: FreezeState,
     active_runs: BTreeSet<String>,
     genomes: BTreeMap<String, GenomeRecord>,
+    worlds: BTreeMap<String, WorldRecord>,
     event_count: u64,
 }
 
@@ -312,6 +591,7 @@ impl ControlState {
             freeze: FreezeState::frozen(operator_token),
             active_runs: BTreeSet::new(),
             genomes: BTreeMap::new(),
+            worlds: BTreeMap::new(),
             event_count: 0,
         };
         for event in events {
@@ -358,6 +638,20 @@ impl ControlState {
                 require_projection_text(&run.run_id, "run_id")?;
                 self.active_runs.remove(&run.run_id);
             }
+            "trace.recorded" => {
+                let receipt: TraceReceipt = serde_json::from_slice(&event.payload)?;
+                validate_trace_receipt(event, &receipt)?;
+                match receipt.kind {
+                    TraceKind::LifecycleStarted | TraceKind::LifecycleResumed => {
+                        self.active_runs
+                            .insert(receipt.provenance.run_id().to_owned());
+                    }
+                    TraceKind::LifecycleCompleted => {
+                        self.active_runs.remove(receipt.provenance.run_id());
+                    }
+                    _ => {}
+                }
+            }
             "genome.registered" => {
                 let genome: GenomeRecord = serde_json::from_slice(&event.payload)?;
                 validate_genome_record(&genome)?;
@@ -370,6 +664,19 @@ impl ControlState {
                 }
                 self.genomes.insert(genome.genome_id.clone(), genome);
             }
+            "world.registered" => {
+                let world: WorldRecord = serde_json::from_slice(&event.payload)?;
+                validate_world_record(&world)?;
+                if let Some(existing) = self.worlds.get(&world.world_id)
+                    && existing != &world
+                {
+                    return Err(ControlError::Projection(
+                        "released World metadata changed".to_owned(),
+                    ));
+                }
+                self.worlds.insert(world.world_id.clone(), world);
+            }
+            "run.result_recorded" => validate_run_result(event)?,
             _ => {}
         }
         self.event_count = event.sequence;
@@ -390,14 +697,36 @@ impl ControlState {
             frozen: self.freeze.is_frozen(),
             active_runs: self.active_runs.iter().cloned().collect(),
             genomes: self.genomes.clone(),
+            worlds: self.worlds.clone(),
             event_count: self.event_count,
         }
     }
 
-    fn verify_genome_artifacts(&self, artifacts: &ArtifactStore) -> Result<(), ControlError> {
+    fn verify_artifacts(
+        &self,
+        history: &[StoredEvent],
+        artifacts: &ArtifactStore,
+    ) -> Result<(), ControlError> {
         for genome in self.genomes.values() {
             let id = ArtifactId::parse(genome.artifact_id.clone())?;
             artifacts.get(&id)?;
+        }
+        for world in self.worlds.values() {
+            let id = ArtifactId::parse(world.artifact_id.clone())?;
+            artifacts.get(&id)?;
+        }
+        for event in history {
+            if event.event_type == "trace.recorded" {
+                let receipt: TraceReceipt = serde_json::from_slice(&event.payload)?;
+                artifacts.get(&ArtifactId::parse(receipt.artifact_id)?)?;
+            } else if event.event_type == "run.result_recorded" {
+                let receipt: OwnedRunResultReceipt = serde_json::from_slice(&event.payload)?;
+                artifacts.get(&ArtifactId::parse(receipt.stdout_artifact_id)?)?;
+                artifacts.get(&ArtifactId::parse(receipt.stderr_artifact_id)?)?;
+                for artifact in receipt.trace_artifact_ids {
+                    artifacts.get(&ArtifactId::parse(artifact)?)?;
+                }
+            }
         }
         Ok(())
     }
@@ -414,6 +743,7 @@ struct ProjectionSnapshot {
     frozen: bool,
     active_runs: Vec<String>,
     genomes: BTreeMap<String, GenomeRecord>,
+    worlds: BTreeMap<String, WorldRecord>,
     event_count: u64,
 }
 
@@ -438,6 +768,93 @@ fn validate_genome_record(genome: &GenomeRecord) -> Result<(), ControlError> {
         validate_content_id(parent, "genome")?;
     }
     Ok(())
+}
+
+fn validate_world_record(world: &WorldRecord) -> Result<(), ControlError> {
+    require_projection_text(&world.world_id, "world_id")?;
+    require_projection_text(&world.name, "name")?;
+    require_projection_text(&world.artifact_id, "artifact_id")?;
+    let world_hash = validate_content_id(&world.world_id, "world")?;
+    ArtifactId::parse(world.artifact_id.clone())?;
+    if world.artifact_id != world_hash {
+        return Err(ControlError::Projection(
+            "World identity does not match its canonical artifact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_trace_receipt(event: &StoredEvent, receipt: &TraceReceipt) -> Result<(), ControlError> {
+    require_projection_text(receipt.provenance.run_id(), "run_id")?;
+    validate_content_id(receipt.provenance.genome_id(), "genome")?;
+    validate_content_id(receipt.provenance.world_id(), "world")?;
+    ArtifactId::parse(receipt.artifact_id.clone())?;
+    if event.actor != "experience-plane"
+        || event.event_id != receipt.event_id
+        || event.aggregate_id != format!("run:{}", receipt.provenance.run_id())
+    {
+        return Err(ControlError::Projection(
+            "trace receipt crossed its provenance boundary".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_run_result(event: &StoredEvent) -> Result<(), ControlError> {
+    let receipt: OwnedRunResultReceipt = serde_json::from_slice(&event.payload)?;
+    require_projection_text(&receipt.run_id, "run_id")?;
+    validate_content_id(&receipt.genome_id, "genome")?;
+    validate_content_id(&receipt.world_id, "world")?;
+    ArtifactId::parse(receipt.stdout_artifact_id)?;
+    ArtifactId::parse(receipt.stderr_artifact_id)?;
+    for artifact in receipt.trace_artifact_ids {
+        ArtifactId::parse(artifact)?;
+    }
+    if event.actor != "runtime-plane"
+        || event.event_id != format!("result:{}", receipt.run_id)
+        || event.aggregate_id != format!("run:{}", receipt.run_id)
+        || receipt.actual_cost_microusd != 0
+        || receipt.latency_millis > 10_000
+        || !matches!(
+            receipt.completion_reason,
+            RunCompletionReason::Success | RunCompletionReason::OutputBudgetExceeded
+        )
+    {
+        return Err(ControlError::Projection(
+            "run result crossed its provenance boundary".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn trace_artifacts_for_run(
+    history: &[StoredEvent],
+    run_id: &str,
+) -> Result<Vec<String>, ExecuteError> {
+    history
+        .iter()
+        .filter(|event| event.event_type == "trace.recorded")
+        .map(|event| {
+            serde_json::from_slice::<TraceReceipt>(&event.payload)
+                .map_err(|_| ExecuteError::Internal)
+        })
+        .filter_map(|receipt| match receipt {
+            Ok(receipt) if receipt.provenance.run_id() == run_id => Some(Ok(receipt.artifact_id)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+const fn run_completion_reason(reason: CompletionReason) -> RunCompletionReason {
+    match reason {
+        CompletionReason::Success => RunCompletionReason::Success,
+        CompletionReason::ProviderFailure => RunCompletionReason::ProviderFailure,
+        CompletionReason::OperatorInterrupt => RunCompletionReason::OperatorInterrupt,
+        CompletionReason::WallBudgetExceeded => RunCompletionReason::WallBudgetExceeded,
+        CompletionReason::OutputBudgetExceeded => RunCompletionReason::OutputBudgetExceeded,
+        CompletionReason::IoFailure => RunCompletionReason::IoFailure,
+    }
 }
 
 fn validate_content_id<'a>(value: &'a str, namespace: &str) -> Result<&'a str, ControlError> {
@@ -467,9 +884,30 @@ fn event_type(command: &Command) -> &'static str {
         Command::Unfreeze => "control.unfreeze",
         Command::KillAll => "control.kill_all",
         Command::GenomeShow { .. } => "control.genome_show",
+        Command::RunReference { .. } => "control.run_reference",
         Command::Replay => "control.replay",
         Command::DaemonStop => "control.daemon_stop",
     }
+}
+
+fn validate_source_repository(path: &Path) -> Result<PathBuf, ControlError> {
+    let canonical = fs::canonicalize(path)?;
+    if !canonical.is_dir() {
+        return Err(ControlError::Protocol(
+            "source repository is not a directory",
+        ));
+    }
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(&canonical)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()?;
+    if !output.status.success() || output.stdout != b"true\n" {
+        return Err(ControlError::Protocol(
+            "source repository is not a Git worktree",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn timestamp_millis() -> Result<i64, ControlError> {
@@ -606,6 +1044,7 @@ fn remove_stale_socket(path: &Path) -> Result<(), ControlError> {
 mod tests {
     use std::{fs, os::unix::fs::symlink};
 
+    use hephaestus_experience::{Provenance, TraceKind, TraceReceipt};
     use hephaestus_ledger::{EventInput, EventStore};
     use tempfile::tempdir;
 
@@ -671,6 +1110,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn projection_rejects_mismatched_commands_and_mutable_genome_metadata() {
         let token = OperatorToken::from_bytes([7; 32]);
         let mismatched = stored_event(
@@ -722,9 +1162,80 @@ mod tests {
         ];
         let state = ControlState::from_events(&lifecycle, &token).expect("replay run lifecycle");
         assert!(state.active_runs.is_empty());
+
+        let provenance = Provenance::new(
+            "r2",
+            format!("hephaestus:genome:{}", "7".repeat(64)),
+            format!("hephaestus:world:{}", "8".repeat(64)),
+        )
+        .expect("valid provenance");
+        let started = TraceReceipt {
+            schema_version: 1,
+            event_id: "fixture-1".to_owned(),
+            provenance: provenance.clone(),
+            kind: TraceKind::LifecycleStarted,
+            artifact_id: "9".repeat(64),
+            redacted_fields: 0,
+        };
+        let completed = TraceReceipt {
+            schema_version: 1,
+            event_id: "fixture-2".to_owned(),
+            provenance,
+            kind: TraceKind::LifecycleCompleted,
+            artifact_id: "a".repeat(64),
+            redacted_fields: 0,
+        };
+        let traces = [
+            stored_event(
+                1,
+                "trace.recorded",
+                "run:r2",
+                "experience-plane",
+                &serde_json::to_vec(&started).expect("encode started trace"),
+            ),
+            stored_event(
+                2,
+                "trace.recorded",
+                "run:r2",
+                "experience-plane",
+                &serde_json::to_vec(&completed).expect("encode completed trace"),
+            ),
+        ];
+        let replayed_trace_state =
+            ControlState::from_events(&traces, &token).expect("replay trace lifecycle");
+        assert!(replayed_trace_state.active_runs.is_empty());
+
+        let world = WorldRecord {
+            world_id: format!("hephaestus:world:{}", "b".repeat(64)),
+            name: "world".to_owned(),
+            artifact_id: "b".repeat(64),
+        };
+        let mut changed_world = world.clone();
+        changed_world.name = "changed".to_owned();
+        let world_events = [
+            stored_event(
+                1,
+                "world.registered",
+                "world",
+                "forge",
+                &serde_json::to_vec(&world).expect("encode World"),
+            ),
+            stored_event(
+                2,
+                "world.registered",
+                "world",
+                "forge",
+                &serde_json::to_vec(&changed_world).expect("encode changed World"),
+            ),
+        ];
+        assert!(matches!(
+            ControlState::from_events(&world_events, &token),
+            Err(ControlError::Projection(_))
+        ));
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn canonical_path_token_and_identity_helpers_fail_closed() {
         assert!(data_dir_from_environment().is_ok());
         assert!(!constant_time_equal(b"short", b"different"));
@@ -738,8 +1249,18 @@ mod tests {
         ));
 
         let directory = tempdir().expect("temporary directory");
+        let data = directory.path().join("data");
+        fs::create_dir(&data).expect("create data directory");
+        assert!(matches!(
+            ControlPlane::open_with_repository(&data, directory.path()),
+            Err(ControlError::Protocol(_))
+        ));
         let ordinary_file = directory.path().join("ordinary");
         fs::write(&ordinary_file, b"file").expect("write ordinary file");
+        assert!(matches!(
+            validate_source_repository(&ordinary_file),
+            Err(ControlError::Protocol(_))
+        ));
         assert!(matches!(
             prepare_private_directory(&ordinary_file),
             Err(ControlError::Protocol(_))
@@ -786,6 +1307,76 @@ mod tests {
         assert!(validate_genome_record(&genome).is_err());
         genome.name = " ".to_owned();
         assert!(validate_genome_record(&genome).is_err());
+
+        let mut world = WorldRecord {
+            world_id: format!("hephaestus:world:{}", "7".repeat(64)),
+            name: "world".to_owned(),
+            artifact_id: "8".repeat(64),
+        };
+        assert!(matches!(
+            validate_world_record(&world),
+            Err(ControlError::Projection(_))
+        ));
+        world.artifact_id = "7".repeat(64);
+        assert!(validate_world_record(&world).is_ok());
+
+        let provenance = Provenance::new(
+            "run",
+            format!("hephaestus:genome:{}", "8".repeat(64)),
+            world.world_id,
+        )
+        .expect("valid provenance");
+        let receipt = TraceReceipt {
+            schema_version: 1,
+            event_id: "fixture-1".to_owned(),
+            provenance,
+            kind: TraceKind::LifecycleStarted,
+            artifact_id: "9".repeat(64),
+            redacted_fields: 0,
+        };
+        let forged_trace = stored_event(
+            1,
+            "trace.recorded",
+            "run:run",
+            "forged",
+            &serde_json::to_vec(&receipt).expect("encode receipt"),
+        );
+        assert!(matches!(
+            validate_trace_receipt(&forged_trace, &receipt),
+            Err(ControlError::Projection(_))
+        ));
+
+        let result_payload = serde_json::json!({
+            "run_id": "run",
+            "genome_id": format!("hephaestus:genome:{}", "8".repeat(64)),
+            "world_id": format!("hephaestus:world:{}", "7".repeat(64)),
+            "completion_reason": "success",
+            "latency_millis": 1,
+            "actual_cost_microusd": 0,
+            "stdout_artifact_id": "a".repeat(64),
+            "stderr_artifact_id": "b".repeat(64),
+            "trace_artifact_ids": ["c".repeat(64)]
+        });
+        let forged_result = stored_event(
+            1,
+            "run.result_recorded",
+            "run:run",
+            "forged",
+            &serde_json::to_vec(&result_payload).expect("encode result"),
+        );
+        assert!(matches!(
+            validate_run_result(&forged_result),
+            Err(ControlError::Projection(_))
+        ));
+        for reason in [
+            CompletionReason::ProviderFailure,
+            CompletionReason::OperatorInterrupt,
+            CompletionReason::WallBudgetExceeded,
+            CompletionReason::OutputBudgetExceeded,
+            CompletionReason::IoFailure,
+        ] {
+            assert_ne!(run_completion_reason(reason), RunCompletionReason::Success);
+        }
     }
 
     fn stored_event(

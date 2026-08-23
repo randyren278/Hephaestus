@@ -35,6 +35,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: GenomeCommand,
     },
+    /// Execute one registered Genome with the offline reference runtime.
+    Run {
+        /// Content-derived registered Genome identity.
+        genome_id: String,
+    },
     /// Verify and replay the canonical event stream.
     Replay,
     /// Control the local daemon process.
@@ -83,6 +88,7 @@ fn main() -> ExitCode {
         CliCommand::Genome {
             command: GenomeCommand::Show { genome_id },
         } => Command::GenomeShow { genome_id },
+        CliCommand::Run { genome_id } => Command::RunReference { genome_id },
         CliCommand::Replay => Command::Replay,
         CliCommand::Daemon {
             command: DaemonCommand::Stop,
@@ -137,6 +143,23 @@ fn print_human(response: &ApiResponse) {
             genome.world_id,
             genome.artifact_id,
             genome.parent_ids.join(",")
+        ),
+        (
+            Some(ResponseData::Run {
+                run_id,
+                genome_id,
+                world_id,
+                completion_reason,
+                latency_millis,
+                actual_cost_microusd,
+                stdout_artifact_id,
+                stderr_artifact_id,
+                trace_artifact_ids,
+            }),
+            None,
+        ) => println!(
+            "run={run_id} genome={genome_id} world={world_id} reason={completion_reason:?} latency_ms={latency_millis} cost_microusd={actual_cost_microusd} stdout={stdout_artifact_id} stderr={stderr_artifact_id} traces={}",
+            trace_artifact_ids.join(",")
         ),
         (
             Some(ResponseData::Replay {

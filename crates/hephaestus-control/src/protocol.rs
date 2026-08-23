@@ -34,6 +34,11 @@ pub enum Command {
         /// Content-derived Genome identity.
         genome_id: String,
     },
+    /// Execute the offline deterministic reference runtime for one registered Genome.
+    RunReference {
+        /// Content-derived registered Genome identity.
+        genome_id: String,
+    },
     /// Verify and replay canonical history into a fresh projection.
     Replay,
     /// Stop the local daemon after acknowledging the audited request.
@@ -110,6 +115,27 @@ pub enum ResponseData {
         /// Canonical projection record.
         genome: GenomeRecord,
     },
+    /// Terminal result from the offline deterministic reference runtime.
+    Run {
+        /// Stable run identity.
+        run_id: String,
+        /// Immutable Genome identity executed by the runtime.
+        genome_id: String,
+        /// Immutable registered World identity governing the run.
+        world_id: String,
+        /// Exact runtime-owned completion reason.
+        completion_reason: RunCompletionReason,
+        /// Runtime-owned terminal latency.
+        latency_millis: u64,
+        /// Exact deterministic provider cost in micro-US dollars.
+        actual_cost_microusd: u64,
+        /// CAS address of the bounded inventory output.
+        stdout_artifact_id: String,
+        /// CAS address of the bounded diagnostic output.
+        stderr_artifact_id: String,
+        /// CAS addresses of the redacted trace artifacts.
+        trace_artifact_ids: Vec<String>,
+    },
     /// Result of a fresh verified replay.
     Replay {
         /// Number of verified canonical events.
@@ -121,6 +147,24 @@ pub enum ResponseData {
         /// Stable BLAKE3 hash of the reconstructed projection.
         projection_hash: String,
     },
+}
+
+/// Stable terminal reasons exposed by the local API.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunCompletionReason {
+    /// The reference runtime completed successfully.
+    Success,
+    /// The provider reported an ordinary failure.
+    ProviderFailure,
+    /// The operator interrupted execution.
+    OperatorInterrupt,
+    /// The wall-clock budget expired.
+    WallBudgetExceeded,
+    /// The output byte budget was exceeded.
+    OutputBudgetExceeded,
+    /// Provider input or output could not be delivered durably.
+    IoFailure,
 }
 
 /// Stable public metadata for an immutable Genome ledger record.
@@ -137,6 +181,18 @@ pub struct GenomeRecord {
     pub artifact_id: String,
     /// Content-derived declared parents.
     pub parent_ids: Vec<String>,
+}
+
+/// Stable public metadata for an immutable World ledger record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldRecord {
+    /// Content-derived World identity.
+    pub world_id: String,
+    /// Stable display name.
+    pub name: String,
+    /// CAS address of canonical World JSON.
+    pub artifact_id: String,
 }
 
 /// Safe local API failure body.

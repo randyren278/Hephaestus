@@ -1,6 +1,6 @@
 # Local Control Plane
 
-`hephaestusd` is the only process allowed to mutate canonical local state. It takes an advisory exclusive lock, verifies the complete hash-linked ledger, verifies every registered Genome artifact, reconstructs the control projection, and only then binds an owner-only Unix socket. The data directory and artifact root are mode 0700; the socket, database, lock, and 256-bit operator token are mode 0600.
+`hephaestusd` is the only process allowed to mutate canonical local state. It takes an advisory exclusive lock, verifies the complete hash-linked ledger plus every registered Genome, World, trace, and run-result artifact, reconstructs the control projection, and only then binds an owner-only Unix socket. The data directory and artifact root are mode 0700; the socket, database, lock, and 256-bit operator token are mode 0600.
 
 ```mermaid
 sequenceDiagram
@@ -25,13 +25,14 @@ hephaestus freeze
 hephaestus unfreeze
 hephaestus kill --all
 hephaestus genome show <id>
+hephaestus run <genome-id>
 hephaestus replay
 hephaestus daemon stop
 ```
 
 `freeze`, `unfreeze`, and `kill --all` are canonical events, so restart reconstructs their effects. `replay` independently reloads and verifies history, rebuilds the projection, compares it with live state, and reports a content hash. Genome inspection only returns immutable records whose identity is bound to verified CAS bytes.
 
-The current milestone tracks active run lifecycle events but does not launch worker processes. The runtime milestone adds supervised process termination behind the already-durable `kill --all` boundary.
+`run` requires an unfreezed daemon, a registered Genome, and that Genome's exact registered World. The daemon fixes the source repository at startup, generates the run ID, narrows authority to read-only/offline, and hands exclusive ownership of the canonical ledger and CAS to the evidence recorder for the synchronous run. The deterministic adapter inventories an isolated worktree; the daemon stores bounded stdout/stderr in CAS, appends a provenance-bound result receipt, cleans the worktree, and returns only terminal metadata and artifact IDs. Trace lifecycle receipts drive active-run projection and remain terminal after restart.
 
 ## Fail-closed boundaries
 

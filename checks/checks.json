@@ -302,8 +302,8 @@
       "id": "inspected-genome-artifact-unverified",
       "file": "crates/hephaestus-control/src/server.rs",
       "invariant": "Daemon startup verifies every registered Genome's canonical CAS bytes.",
-      "find": "            artifacts.get(&id)?;",
-      "replace": "            let _unverified = id;"
+      "find": "        for genome in self.genomes.values() {\n            let id = ArtifactId::parse(genome.artifact_id.clone())?;\n            artifacts.get(&id)?;\n        }",
+      "replace": "        for genome in self.genomes.values() {\n            let id = ArtifactId::parse(genome.artifact_id.clone())?;\n            let _unverified = id;\n        }"
     },
     {
       "id": "replay-divergence-accepted",
@@ -311,6 +311,48 @@
       "invariant": "The replay command fails if fresh canonical projection differs from live state.",
       "find": "        if replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }",
       "replace": "        if false && replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }"
+    },
+    {
+      "id": "frozen-reference-run-started",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The persistent operator freeze blocks all new reference execution.",
+      "find": "        if self.state.freeze.is_frozen() {\n            return Err(ExecuteError::Invalid(\"evolution is frozen\"));\n        }",
+      "replace": "        if false && self.state.freeze.is_frozen() {\n            return Err(ExecuteError::Invalid(\"evolution is frozen\"));\n        }"
+    },
+    {
+      "id": "unregistered-world-executed",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A reference run resolves an immutable registered World rather than trusting a Genome string.",
+      "find": "        if !self.state.worlds.contains_key(&genome.world_id) {\n            return Err(ExecuteError::Invalid(\"Genome World is not registered\"));\n        }",
+      "replace": "        if false && !self.state.worlds.contains_key(&genome.world_id) {\n            return Err(ExecuteError::Invalid(\"Genome World is not registered\"));\n        }"
+    },
+    {
+      "id": "reference-runtime-workspace-authority-widened",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The offline reference runtime receives read-only and offline authority regardless of Genome ceiling.",
+      "find": "            CapabilitySet::new(false, false),",
+      "replace": "            CapabilitySet::new(true, false),"
+    },
+    {
+      "id": "trace-completion-projection-ignored",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Canonical terminal trace evidence removes the run from the daemon active projection.",
+      "find": "                    TraceKind::LifecycleCompleted => {\n                        self.active_runs.remove(receipt.provenance.run_id());\n                    }",
+      "replace": "                    TraceKind::LifecycleCompleted => {}"
+    },
+    {
+      "id": "registered-world-artifact-unverified",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Daemon startup verifies every registered World's canonical CAS bytes.",
+      "find": "        for world in self.worlds.values() {\n            let id = ArtifactId::parse(world.artifact_id.clone())?;\n            artifacts.get(&id)?;\n        }",
+      "replace": "        for world in self.worlds.values() {\n            let id = ArtifactId::parse(world.artifact_id.clone())?;\n            let _unverified = id;\n        }"
+    },
+    {
+      "id": "reference-runtime-cost-falsified",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The deterministic reference result reports its exact zero provider cost.",
+      "find": "        actual_cost_microusd: 0,",
+      "replace": "        actual_cost_microusd: 1,"
     },
     {
       "id": "workspace-capability-report-inverted",

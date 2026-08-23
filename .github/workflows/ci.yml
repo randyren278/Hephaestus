@@ -65,7 +65,7 @@ jobs:
           - crate: hephaestus-genome
             minimum: 13
           - crate: hephaestus-control
-            minimum: 11
+            minimum: 17
           - crate: hephaestus-runtime
             minimum: 24
           - crate: hephaestus-experience

@@ -39,8 +39,30 @@ impl<R> RecordedRuntime<R> {
     ///
     /// Rejects an evidence ledger that cannot be replayed and verified.
     pub fn new(inner: R, evidence: EvidenceRecorder) -> Result<Self, RuntimeError> {
-        let sequence = u64::try_from(evidence.replay_verified().map_err(evidence_error)?.len())
-            .map_err(|_| RuntimeError::Evidence("evidence sequence exceeds u64".to_owned()))?;
+        Self::new_recoverable(inner, evidence).map_err(|recovery| recovery.0)
+    }
+
+    /// Wraps a runtime without losing ownership when evidence verification fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error together with both inputs so a single-writer composition
+    /// root can recover its canonical stores.
+    pub fn new_recoverable(
+        inner: R,
+        evidence: EvidenceRecorder,
+    ) -> Result<Self, Box<(RuntimeError, R, EvidenceRecorder)>> {
+        let history = match evidence.replay_verified() {
+            Ok(history) => history,
+            Err(error) => return Err(Box::new((evidence_error(error), inner, evidence))),
+        };
+        let Ok(sequence) = u64::try_from(history.len()) else {
+            return Err(Box::new((
+                RuntimeError::Evidence("evidence sequence exceeds u64".to_owned()),
+                inner,
+                evidence,
+            )));
+        };
         Ok(Self {
             inner,
             evidence,
@@ -59,6 +81,12 @@ impl<R> RecordedRuntime<R> {
     #[must_use]
     pub const fn evidence(&self) -> &EvidenceRecorder {
         &self.evidence
+    }
+
+    /// Returns the wrapped runtime and evidence recorder to their owner.
+    #[must_use]
+    pub fn into_parts(self) -> (R, EvidenceRecorder) {
+        (self.inner, self.evidence)
     }
 
     fn record(
@@ -230,6 +258,14 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             (
                 "wall_budget_millis".to_owned(),
                 spec.budget().wall().as_millis().to_string(),
+            ),
+            (
+                "workspace_write".to_owned(),
+                spec.capabilities().allows_workspace_write().to_string(),
+            ),
+            (
+                "network".to_owned(),
+                spec.capabilities().allows_network().to_string(),
             ),
         ]);
         if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {

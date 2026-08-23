@@ -9,6 +9,9 @@ struct Arguments {
     /// Canonical daemon data directory.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// Git repository materialized into isolated reference-run worktrees.
+    #[arg(long)]
+    source_repository: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -23,7 +26,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match ControlPlane::open(data_dir).and_then(ControlPlane::serve) {
+    let source_repository = match arguments
+        .source_repository
+        .map_or_else(std::env::current_dir, Ok)
+    {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("hephaestusd: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match ControlPlane::open_with_repository(data_dir, source_repository)
+        .and_then(ControlPlane::serve)
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("hephaestusd: {error}");

@@ -11,8 +11,9 @@ use std::{
 
 use hephaestus_control::{
     API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, ControlPlane,
-    GenomeRecord, ResponseData,
+    GenomeRecord, ResponseData, RunCompletionReason, WorldRecord,
 };
+use hephaestus_genome::{SourceFormat, compile_genome, compile_world};
 use hephaestus_ledger::{ArtifactStore, EventInput, EventStore};
 use tempfile::tempdir;
 
@@ -26,9 +27,15 @@ struct Daemon {
 
 impl Daemon {
     fn start(data_dir: &Path) -> Self {
+        Self::start_with_repository(data_dir, Path::new(env!("CARGO_MANIFEST_DIR")))
+    }
+
+    fn start_with_repository(data_dir: &Path, source_repository: &Path) -> Self {
         let mut child = ProcessCommand::new(DAEMON)
             .arg("--data-dir")
             .arg(data_dir)
+            .arg("--source-repository")
+            .arg(source_repository)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -63,6 +70,176 @@ impl Daemon {
         self.child.kill().expect("stop daemon");
         self.child.wait().expect("wait for daemon");
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
+    let directory = tempdir().expect("temporary directory");
+    let data_dir = directory.path().join("data");
+    let repository = directory.path().join("source");
+    fs::create_dir_all(&repository).expect("create source repository");
+    git(&repository, &["init"]);
+    git(&repository, &["config", "user.name", "Hephaestus Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "hephaestus@example.invalid"],
+    );
+    fs::write(repository.join("README.md"), b"reference inventory\n").expect("write fixture");
+    fs::create_dir(repository.join("src")).expect("create source directory");
+    fs::write(
+        repository.join("src/lib.rs"),
+        b"pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("write source fixture");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let (world, genome) = seed_compiled_genome(&data_dir);
+
+    let daemon = Daemon::start_with_repository(&data_dir, &repository);
+    let frozen = cli(&data_dir, &["run", &genome.genome_id]);
+    assert!(!frozen.status.success());
+    assert_eq!(
+        serde_json::from_slice::<ApiResponse>(&frozen.stdout)
+            .expect("decode frozen response")
+            .error
+            .expect("frozen error")
+            .code,
+        ApiErrorCode::InvalidRequest
+    );
+    assert!(cli(&data_dir, &["unfreeze"]).status.success());
+    let run = response(&cli(&data_dir, &["run", &genome.genome_id]));
+    let (run_id, stdout_artifact_id, stderr_artifact_id, trace_artifact_ids, latency_millis) =
+        match run.data.expect("run response") {
+            ResponseData::Run {
+                run_id,
+                genome_id,
+                world_id,
+                completion_reason: RunCompletionReason::Success,
+                latency_millis,
+                actual_cost_microusd: 0,
+                stdout_artifact_id,
+                stderr_artifact_id,
+                trace_artifact_ids,
+            } => {
+                assert_eq!(genome_id, genome.genome_id);
+                assert_eq!(world_id, world.world_id);
+                (
+                    run_id,
+                    stdout_artifact_id,
+                    stderr_artifact_id,
+                    trace_artifact_ids,
+                    latency_millis,
+                )
+            }
+            other => panic!("unexpected run response: {other:?}"),
+        };
+    assert!(run_id.starts_with("reference-"));
+    assert!(latency_millis <= 10_000);
+    assert_eq!(trace_artifact_ids.len(), 6);
+
+    let artifacts = ArtifactStore::open(data_dir.join("blobs")).expect("open artifacts");
+    let stdout = artifacts
+        .get(&hephaestus_ledger::ArtifactId::parse(stdout_artifact_id.clone()).expect("stdout ID"))
+        .expect("read stdout artifact");
+    let inventory: serde_json::Value = serde_json::from_slice(&stdout).expect("decode inventory");
+    assert_eq!(inventory["schema_version"], 1);
+    assert_eq!(inventory["genome_id"], genome.genome_id);
+    assert_eq!(inventory["world_id"], world.world_id);
+    assert!(inventory["checkpoint"].is_null());
+    let paths: Vec<_> = inventory["files"]
+        .as_array()
+        .expect("inventory files")
+        .iter()
+        .map(|file| file["path"].as_str().expect("file path"))
+        .collect();
+    assert_eq!(paths, ["README.md", "src/lib.rs"]);
+    assert_eq!(
+        artifacts
+            .get(
+                &hephaestus_ledger::ArtifactId::parse(stderr_artifact_id.clone())
+                    .expect("stderr ID")
+            )
+            .expect("read stderr artifact"),
+        b""
+    );
+    let operator_token = fs::read_to_string(data_dir.join("operator.token")).expect("read token");
+    for id in &trace_artifact_ids {
+        let bytes = artifacts
+            .get(&hephaestus_ledger::ArtifactId::parse(id.clone()).expect("trace ID"))
+            .expect("read trace artifact");
+        assert!(!String::from_utf8_lossy(&bytes).contains(&operator_token));
+    }
+    let started_bytes = artifacts
+        .get(
+            &hephaestus_ledger::ArtifactId::parse(trace_artifact_ids[0].clone())
+                .expect("started trace ID"),
+        )
+        .expect("read started trace");
+    let started: serde_json::Value =
+        serde_json::from_slice(&started_bytes).expect("decode started trace");
+    assert_eq!(started["kind"], "lifecycle_started");
+    assert_eq!(started["fields"]["workspace_write"], "false");
+    assert_eq!(started["fields"]["network"], "false");
+    assert!(matches!(
+        response(&cli(&data_dir, &["status"])).data,
+        Some(ResponseData::Status { active_runs: 0, .. })
+    ));
+    assert!(matches!(
+        response(&cli(&data_dir, &["replay"])).data,
+        Some(ResponseData::Replay { active_runs: 0, .. })
+    ));
+    assert_eq!(
+        fs::read_dir(data_dir.join("sandboxes"))
+            .expect("read sandbox root")
+            .count(),
+        0
+    );
+    daemon.stop();
+
+    let ledger = EventStore::open(data_dir.join("events.sqlite3")).expect("reopen ledger");
+    let history = ledger.replay_verified().expect("verify history");
+    let run_events: Vec<_> = history
+        .iter()
+        .filter(|event| event.aggregate_id == format!("run:{run_id}"))
+        .collect();
+    assert_eq!(run_events.len(), 7);
+    assert_eq!(
+        run_events.first().expect("first trace").event_type,
+        "trace.recorded"
+    );
+    assert_eq!(
+        run_events.last().expect("result receipt").event_type,
+        "run.result_recorded"
+    );
+    let terminal_artifact = artifacts
+        .get(
+            &hephaestus_ledger::ArtifactId::parse(
+                trace_artifact_ids.last().expect("terminal trace").clone(),
+            )
+            .expect("terminal artifact ID"),
+        )
+        .expect("terminal artifact");
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&terminal_artifact).expect("decode terminal artifact");
+    assert_eq!(terminal["kind"], "lifecycle_completed");
+    assert_eq!(terminal["fields"]["completion_reason"], "success");
+    assert_eq!(terminal["fields"]["actual_cost_microusd"], "0");
+    assert_eq!(
+        terminal["fields"]["latency_millis"],
+        latency_millis.to_string()
+    );
+
+    let restarted = Daemon::start_with_repository(&data_dir, &repository);
+    assert!(matches!(
+        response(&cli(&data_dir, &["status"])).data,
+        Some(ResponseData::Status { active_runs: 0, .. })
+    ));
+    assert!(matches!(
+        response(&cli(&data_dir, &["replay"])).data,
+        Some(ResponseData::Replay { active_runs: 0, .. })
+    ));
+    restarted.stop();
 }
 
 impl Drop for Daemon {
@@ -308,6 +485,51 @@ fn daemon_rejects_forged_operator_history_and_unverifiable_genomes() {
         ControlPlane::open(missing_directory.path()),
         Err(ControlError::Ledger(_))
     ));
+
+    let missing_world_directory = tempdir().expect("temporary directory");
+    let world_hash = "4".repeat(64);
+    let missing_world = WorldRecord {
+        world_id: format!("hephaestus:world:{world_hash}"),
+        name: "missing-world".to_owned(),
+        artifact_id: world_hash,
+    };
+    let mut world_ledger = EventStore::open(missing_world_directory.path().join("events.sqlite3"))
+        .expect("open missing World ledger");
+    world_ledger
+        .append(EventInput::new(
+            "missing-world",
+            &missing_world.world_id,
+            "world.registered",
+            "test-fixture",
+            1,
+            serde_json::to_vec(&missing_world).expect("encode missing World"),
+        ))
+        .expect("append missing World");
+    drop(world_ledger);
+    assert!(matches!(
+        ControlPlane::open(missing_world_directory.path()),
+        Err(ControlError::Ledger(_))
+    ));
+}
+
+#[test]
+fn reference_run_rejects_a_genome_without_a_registered_world() {
+    let directory = tempdir().expect("temporary directory");
+    let genome = seed_canonical_state(directory.path());
+    let daemon = Daemon::start(directory.path());
+    assert!(cli(directory.path(), &["unfreeze"]).status.success());
+    let output = cli(directory.path(), &["run", &genome.genome_id]);
+    assert!(!output.status.success());
+    let error = serde_json::from_slice::<ApiResponse>(&output.stdout)
+        .expect("decode response")
+        .error
+        .expect("missing World error");
+    assert_eq!(error.code, ApiErrorCode::InvalidRequest);
+    assert!(matches!(
+        response(&cli(directory.path(), &["status"])).data,
+        Some(ResponseData::Status { active_runs: 1, .. })
+    ));
+    daemon.stop();
 }
 
 fn seed_canonical_state(data_dir: &Path) -> GenomeRecord {
@@ -345,6 +567,101 @@ fn seed_canonical_state(data_dir: &Path) -> GenomeRecord {
         ))
         .expect("append active run");
     genome
+}
+
+fn seed_compiled_genome(data_dir: &Path) -> (WorldRecord, GenomeRecord) {
+    fs::create_dir_all(data_dir).expect("create data directory");
+    let artifacts = ArtifactStore::open(data_dir.join("blobs")).expect("open artifact store");
+    let world_source = r#"{
+        "schema_version": 1,
+        "name": "reference-world",
+        "laws": {
+            "candidate_network": false,
+            "candidate_evaluator_access": false,
+            "maximum_cost_microusd": 0
+        },
+        "authority_ceiling": { "workspace_write": false, "network": false },
+        "mutation_scope": [],
+        "promotion": {
+            "minimum_delta_bps": 0,
+            "maximum_regressions": 0,
+            "confidence_bps": 9500
+        },
+        "objectives": ["inventory"],
+        "evaluator_artifacts": {}
+    }"#;
+    let compiled_world =
+        compile_world(world_source, SourceFormat::Json, &artifacts).expect("compile World");
+    let world_artifact = artifacts
+        .put(compiled_world.canonical_json())
+        .expect("store World");
+    let world = WorldRecord {
+        world_id: compiled_world.id().to_owned(),
+        name: compiled_world.name().to_owned(),
+        artifact_id: world_artifact.as_str().to_owned(),
+    };
+    let genome_source = r#"{
+        "schema_version": 1,
+        "name": "reference-genome",
+        "parents": [],
+        "model": { "provider": "deterministic", "family": "reference" },
+        "authority": { "workspace_write": false, "network": false },
+        "artifacts": {}
+    }"#;
+    let compiled_genome = compile_genome(
+        genome_source,
+        SourceFormat::Json,
+        &compiled_world,
+        &std::collections::BTreeMap::new(),
+        &artifacts,
+    )
+    .expect("compile Genome");
+    let genome_artifact = artifacts
+        .put(compiled_genome.canonical_json())
+        .expect("store Genome");
+    let genome = GenomeRecord {
+        genome_id: compiled_genome.id().to_owned(),
+        name: compiled_genome.name().to_owned(),
+        world_id: world.world_id.clone(),
+        artifact_id: genome_artifact.as_str().to_owned(),
+        parent_ids: compiled_genome.parents().to_vec(),
+    };
+    let mut ledger = EventStore::open(data_dir.join("events.sqlite3")).expect("open event ledger");
+    ledger
+        .append(EventInput::new(
+            "reference-world",
+            &world.world_id,
+            "world.registered",
+            "test-fixture",
+            1,
+            serde_json::to_vec(&world).expect("encode World"),
+        ))
+        .expect("register World");
+    ledger
+        .append(EventInput::new(
+            "reference-genome",
+            &genome.genome_id,
+            "genome.registered",
+            "test-fixture",
+            2,
+            serde_json::to_vec(&genome).expect("encode Genome"),
+        ))
+        .expect("register Genome");
+    (world, genome)
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn cli(data_dir: &Path, arguments: &[&str]) -> Output {

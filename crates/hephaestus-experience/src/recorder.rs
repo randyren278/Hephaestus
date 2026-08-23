@@ -65,6 +65,28 @@ impl EvidenceRecorder {
         })
     }
 
+    /// Takes ownership of already-open canonical stores.
+    #[must_use]
+    pub fn from_stores(
+        events: EventStore,
+        artifacts: ArtifactStore,
+        redaction: RedactionPolicy,
+        limits: RetentionLimits,
+    ) -> Self {
+        Self {
+            events,
+            artifacts,
+            redaction,
+            limits,
+        }
+    }
+
+    /// Returns the canonical stores to their single-writer composition root.
+    #[must_use]
+    pub fn into_stores(self) -> (EventStore, ArtifactStore) {
+        (self.events, self.artifacts)
+    }
+
     /// Redacts, bounds, content-addresses, and canonically appends one runtime trace.
     ///
     /// # Errors

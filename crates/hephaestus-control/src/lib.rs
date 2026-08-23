@@ -9,6 +9,6 @@ pub use client::Client;
 pub use error::ControlError;
 pub use protocol::{
     API_VERSION, ApiError, ApiErrorCode, ApiRequest, ApiResponse, Command, GenomeRecord,
-    ResponseData,
+    ResponseData, RunCompletionReason, WorldRecord,
 };
 pub use server::{ControlPlane, data_dir_from_environment};
