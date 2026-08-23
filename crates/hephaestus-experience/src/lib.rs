@@ -5,6 +5,7 @@ mod integration;
 mod record;
 mod recorder;
 mod redaction;
+mod run_result;
 
 pub use error::ExperienceError;
 pub use integration::RecordedRuntime;
@@ -14,3 +15,4 @@ pub use record::{
 };
 pub use recorder::{EvidenceRecorder, RetentionLimits};
 pub use redaction::RedactionPolicy;
+pub use run_result::{RUN_RESULT_SCHEMA_VERSION, RunCompletionReason, RunResultReceipt};

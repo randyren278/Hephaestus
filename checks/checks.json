@@ -17,6 +17,7 @@
     "crates/hephaestus-control/src/client.rs",
     "crates/hephaestus-control/src/server.rs",
     "crates/hephaestus-experience/src/integration.rs",
+    "crates/hephaestus-experience/src/run_result.rs",
     "crates/hephaestus-experience/src/record.rs",
     "crates/hephaestus-experience/src/recorder.rs",
     "crates/hephaestus-experience/src/redaction.rs",
@@ -840,10 +841,45 @@
     },
     {
       "id": "run-result-revision-forgotten",
-      "file": "crates/hephaestus-control/src/server.rs",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
       "invariant": "The canonical run result receipt binds the exact inventoried source revision.",
-      "find": "        source_revision: source_revision.to_owned(),",
-      "replace": "        source_revision: \"0000000000000000000000000000000000000000\".to_owned(),"
+      "find": "        validate_source_revision(&self.source_revision)?;",
+      "replace": ""
+    },
+    {
+      "id": "run-result-schema-version-ignored",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "Unknown canonical run-result receipt schemas fail closed.",
+      "find": "        if self.schema_version != RUN_RESULT_SCHEMA_VERSION {",
+      "replace": "        if false && self.schema_version != RUN_RESULT_SCHEMA_VERSION {"
+    },
+    {
+      "id": "run-result-actor-forged",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "Only the fixed runtime plane can author a canonical run-result receipt.",
+      "find": "            || event.actor != RUNTIME_ACTOR",
+      "replace": ""
+    },
+    {
+      "id": "run-result-cost-unbounded",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "The deterministic reference receipt cannot claim non-zero provider cost.",
+      "find": "        if self.actual_cost_microusd != 0 {",
+      "replace": "        if false && self.actual_cost_microusd != 0 {"
+    },
+    {
+      "id": "run-result-output-artifact-unvalidated",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "Canonical run-result output references must be valid content addresses.",
+      "find": "        validate_artifact_id(&self.stdout_artifact_id)?;",
+      "replace": ""
+    },
+    {
+      "id": "artifact-preflight-address-forged",
+      "file": "crates/hephaestus-ledger/src/artifact_store.rs",
+      "invariant": "A non-writing artifact preflight computes the same canonical BLAKE3 address as publication.",
+      "find": "        Self(blake3::hash(bytes).to_hex().to_string())",
+      "replace": "        Self(blake3::hash(b\"\").to_hex().to_string())"
     }
   ]
 }

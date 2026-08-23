@@ -220,6 +220,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
     let result_receipt: serde_json::Value =
         serde_json::from_slice(&run_events.last().expect("result receipt").payload)
             .expect("decode result receipt");
+    assert_eq!(result_receipt["schema_version"], 1);
     assert_eq!(result_receipt["source_revision"], source_revision);
     let terminal_artifact = artifacts
         .get(

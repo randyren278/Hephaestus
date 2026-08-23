@@ -699,28 +699,28 @@ mod tests {
         let run_spec = spec(
             "unit-interrupt",
             repository.path(),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             1_000,
         );
         let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
         let script = sandbox.worktree().join("spawn-child");
         fs::write(
             &script,
-            b"#!/bin/sh\n/bin/sleep 4 &\necho $! > child.pid\nwait\n",
+            b"#!/bin/sh\n/bin/sleep 4 &\necho $! > \"$1\"\nwait\n",
         )
         .expect("write process fixture");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
             .expect("make process fixture executable");
-        let mut runtime = test_runtime(&script, []);
+        let child_pid_path = sandbox.execution_dir().join("child.pid");
+        let mut runtime = test_runtime(&script, [child_pid_path.display().to_string()]);
         runtime
             .start(&run_spec, &sandbox, &token)
             .expect("start process group");
-        let child_pid_path = sandbox.worktree().join("child.pid");
-        for _ in 0..100 {
+        for _ in 0..500 {
             if child_pid_path.is_file() {
                 break;
             }
-            thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(10));
         }
         let child_pid = fs::read_to_string(child_pid_path)
             .expect("read child PID")

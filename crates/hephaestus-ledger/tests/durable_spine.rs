@@ -209,6 +209,12 @@ fn artifact_store_deduplicates_and_detects_substitution() {
     let directory = tempdir().expect("temporary directory");
     let store = ArtifactStore::open(directory.path().join("blobs")).expect("open artifact store");
 
+    let calculated = ArtifactId::for_bytes(b"candidate patch");
+    assert_eq!(
+        calculated.as_str(),
+        blake3::hash(b"candidate patch").to_hex().as_str()
+    );
+    assert!(!store.path_for(&calculated).exists());
     let first = store.put(b"candidate patch").expect("store artifact");
     let duplicate = store.put(b"candidate patch").expect("deduplicate artifact");
     let other = store
@@ -216,6 +222,7 @@ fn artifact_store_deduplicates_and_detects_substitution() {
         .expect("store other artifact");
 
     assert_eq!(first, duplicate);
+    assert_eq!(first, calculated);
     assert_ne!(first, other);
     assert_eq!(
         ArtifactId::parse(first.as_str()).expect("parse canonical address"),

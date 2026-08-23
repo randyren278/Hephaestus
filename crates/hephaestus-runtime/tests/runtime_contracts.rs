@@ -174,6 +174,17 @@ fn run_specs_pin_the_resolved_revision_before_head_moves() {
 #[test]
 fn run_specs_reject_unresolvable_revisions_at_construction() {
     let repository = repository_fixture();
+    let empty = RunSpec::new_at_revision(
+        "empty-revision",
+        "hephaestus:genome:test",
+        "hephaestus:world:test",
+        repository.path(),
+        "   ",
+        "inventory the isolated worktree",
+        CapabilitySet::new(false, false),
+        Budget::new(Duration::from_secs(5), 1_000_000, 0).expect("budget"),
+    );
+    assert!(matches!(empty, Err(RuntimeError::InvalidSpec(_))));
     let result = RunSpec::new_at_revision(
         "invalid-revision",
         "hephaestus:genome:test",
@@ -185,6 +196,51 @@ fn run_specs_reject_unresolvable_revisions_at_construction() {
         Budget::new(Duration::from_secs(5), 1_000_000, 0).expect("budget"),
     );
     assert!(matches!(result, Err(RuntimeError::Git(_))));
+}
+
+#[test]
+fn sandbox_rejects_specs_for_another_run_or_repository_at_the_same_revision() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let original = spec("binding-run", repository.path(), 1_000_000, false);
+    let (sandbox, token) = manager.create(&original).expect("create sandbox");
+    let other_run = RunSpec::new_at_revision(
+        "other-run",
+        original.genome_id(),
+        original.world_id(),
+        original.source_repository(),
+        original.source_revision(),
+        original.prompt(),
+        original.capabilities(),
+        original.budget(),
+    )
+    .expect("other run spec");
+    assert!(matches!(
+        DeterministicRuntime::default().start(&other_run, &sandbox, &token),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+
+    let alias_root = tempdir().expect("repository alias directory");
+    let repository_alias = alias_root.path().join("repository-alias");
+    std::os::unix::fs::symlink(repository.path(), &repository_alias).expect("repository symlink");
+    let other_repository = RunSpec::new_at_revision(
+        original.run_id(),
+        original.genome_id(),
+        original.world_id(),
+        &repository_alias,
+        original.source_revision(),
+        original.prompt(),
+        original.capabilities(),
+        original.budget(),
+    )
+    .expect("aliased repository spec");
+    assert!(matches!(
+        DeterministicRuntime::default().start(&other_repository, &sandbox, &token),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    sandbox.cleanup().expect("clean sandbox");
 }
 
 #[test]
@@ -515,29 +571,33 @@ fn supervisor_interrupt_waits_for_process_group_termination() {
     let run_spec = spec_with_budget(
         "supervised-interrupt",
         repository.path(),
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         1_000,
     );
     let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
     let script = sandbox.worktree().join("spawn-child");
     fs::write(
         &script,
-        b"#!/bin/sh\n/bin/sleep 4 &\necho $! > child.pid\nwait\n",
+        b"#!/bin/sh\n/bin/sleep 4 &\necho $! > \"$1\"\nwait\n",
     )
     .expect("write child process fixture");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
         .expect("make child process fixture executable");
-    let mut runtime = SupervisedRuntime::deterministic(isolation_policy(), &script, [])
-        .expect("create interrupt runtime");
+    let child_pid_path = sandbox.execution_dir().join("child.pid");
+    let mut runtime = SupervisedRuntime::deterministic(
+        isolation_policy(),
+        &script,
+        [child_pid_path.display().to_string()],
+    )
+    .expect("create interrupt runtime");
     runtime
         .start(&run_spec, &sandbox, &token)
         .expect("start interrupt process");
-    let child_pid_path = sandbox.worktree().join("child.pid");
-    for _ in 0..100 {
+    for _ in 0..500 {
         if child_pid_path.is_file() {
             break;
         }
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(10));
     }
     let child_pid = fs::read_to_string(&child_pid_path)
         .expect("read child PID")

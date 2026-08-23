@@ -1,3 +1,4 @@
+pub use hephaestus_experience::RunCompletionReason;
 use serde::{Deserialize, Serialize};
 
 /// The only local operator API version accepted by this release.
@@ -149,24 +150,6 @@ pub enum ResponseData {
         /// Stable BLAKE3 hash of the reconstructed projection.
         projection_hash: String,
     },
-}
-
-/// Stable terminal reasons exposed by the local API.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunCompletionReason {
-    /// The reference runtime completed successfully.
-    Success,
-    /// The provider reported an ordinary failure.
-    ProviderFailure,
-    /// The operator interrupted execution.
-    OperatorInterrupt,
-    /// The wall-clock budget expired.
-    WallBudgetExceeded,
-    /// The output byte budget was exceeded.
-    OutputBudgetExceeded,
-    /// Provider input or output could not be delivered durably.
-    IoFailure,
 }
 
 /// Stable public metadata for an immutable Genome ledger record.

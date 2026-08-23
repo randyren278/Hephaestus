@@ -37,7 +37,12 @@ impl ArtifactId {
         &self.0
     }
 
-    fn for_bytes(bytes: &[u8]) -> Self {
+    /// Calculates the canonical content address without writing the bytes.
+    ///
+    /// This supports validate-before-publish workflows that must compare a
+    /// proposed artifact with an immutable commitment before mutating storage.
+    #[must_use]
+    pub fn for_bytes(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).to_hex().to_string())
     }
 }

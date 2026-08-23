@@ -66,19 +66,19 @@ jobs:
             minimum: 9
           - scope: hephaestus-ledger
             prefix: crates/hephaestus-ledger/
-            minimum: 9
+            minimum: 10
           - scope: hephaestus-genome
             prefix: crates/hephaestus-genome/
             minimum: 13
           - scope: hephaestus-control
             prefix: crates/hephaestus-control/
-            minimum: 18
+            minimum: 17
           - scope: hephaestus-runtime
             prefix: crates/hephaestus-runtime/
             minimum: 27
           - scope: hephaestus-experience
             prefix: crates/hephaestus-experience/
-            minimum: 35
+            minimum: 40
           - scope: python-statistics
             prefix: python/
             minimum: 5

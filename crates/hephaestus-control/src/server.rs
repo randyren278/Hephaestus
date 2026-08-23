@@ -15,7 +15,8 @@ use std::{
 use fs2::FileExt;
 use hephaestus_core::authority::{CapabilitySet, FreezeState, OperatorToken};
 use hephaestus_experience::{
-    EvidenceRecorder, RecordedRuntime, RedactionPolicy, RetentionLimits, TraceKind, TraceReceipt,
+    EvidenceRecorder, RecordedRuntime, RedactionPolicy, RetentionLimits, RunResultReceipt,
+    TraceKind, TraceReceipt,
 };
 use hephaestus_genome::{SourceFormat, compile_world};
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
@@ -399,32 +400,29 @@ impl ControlPlane {
         else {
             return Err(ExecuteError::Internal);
         };
-        let receipt = RunResultReceipt {
-            run_id,
-            genome_id,
-            world_id,
-            source_revision,
-            completion_reason: *completion_reason,
-            latency_millis: *latency_millis,
-            actual_cost_microusd: *actual_cost_microusd,
-            stdout_artifact_id,
-            stderr_artifact_id,
-            trace_artifact_ids,
-        };
-        let payload = serde_json::to_vec(&receipt).map_err(|_| ExecuteError::Internal)?;
+        let receipt = RunResultReceipt::new(
+            run_id.clone(),
+            genome_id.clone(),
+            world_id.clone(),
+            source_revision.clone(),
+            *completion_reason,
+            *latency_millis,
+            *actual_cost_microusd,
+            stdout_artifact_id.clone(),
+            stderr_artifact_id.clone(),
+            trace_artifact_ids.clone(),
+        )
+        .map_err(|_| ExecuteError::Internal)?;
         let timestamp = timestamp_millis().map_err(|_| ExecuteError::Internal)?;
         self.storage
             .as_mut()
             .ok_or(ExecuteError::Internal)?
             .ledger
-            .append(EventInput::new(
-                format!("result:{run_id}"),
-                format!("run:{run_id}"),
-                "run.result_recorded",
-                "runtime-plane",
-                timestamp,
-                payload,
-            ))
+            .append(
+                receipt
+                    .into_event_input(timestamp)
+                    .map_err(|_| ExecuteError::Internal)?,
+            )
             .map_err(|_| ExecuteError::Internal)?;
         Ok(())
     }
@@ -456,35 +454,6 @@ struct AuditedCommand<'a> {
 struct RecordedCommand {
     request_id: String,
     command: Command,
-}
-
-#[derive(Serialize)]
-struct RunResultReceipt<'a> {
-    run_id: &'a str,
-    genome_id: &'a str,
-    world_id: &'a str,
-    source_revision: &'a str,
-    completion_reason: RunCompletionReason,
-    latency_millis: u64,
-    actual_cost_microusd: u64,
-    stdout_artifact_id: &'a str,
-    stderr_artifact_id: &'a str,
-    trace_artifact_ids: &'a [String],
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OwnedRunResultReceipt {
-    run_id: String,
-    genome_id: String,
-    world_id: String,
-    source_revision: String,
-    completion_reason: RunCompletionReason,
-    latency_millis: u64,
-    actual_cost_microusd: u64,
-    stdout_artifact_id: String,
-    stderr_artifact_id: String,
-    trace_artifact_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -739,7 +708,9 @@ impl ControlState {
                 let receipt: TraceReceipt = serde_json::from_slice(&event.payload)?;
                 artifacts.get(&ArtifactId::parse(receipt.artifact_id)?)?;
             } else if event.event_type == "run.result_recorded" {
-                let receipt: OwnedRunResultReceipt = serde_json::from_slice(&event.payload)?;
+                let receipt = RunResultReceipt::parse_from_event(event).map_err(|_| {
+                    ControlError::Projection("canonical run result is invalid".to_owned())
+                })?;
                 artifacts.get(&ArtifactId::parse(receipt.stdout_artifact_id)?)?;
                 artifacts.get(&ArtifactId::parse(receipt.stderr_artifact_id)?)?;
                 for artifact in receipt.trace_artifact_ids {
@@ -820,41 +791,9 @@ fn validate_trace_receipt(event: &StoredEvent, receipt: &TraceReceipt) -> Result
 }
 
 fn validate_run_result(event: &StoredEvent) -> Result<(), ControlError> {
-    let receipt: OwnedRunResultReceipt = serde_json::from_slice(&event.payload)?;
-    require_projection_text(&receipt.run_id, "run_id")?;
-    validate_content_id(&receipt.genome_id, "genome")?;
-    validate_content_id(&receipt.world_id, "world")?;
-    validate_source_revision(&receipt.source_revision)?;
-    ArtifactId::parse(receipt.stdout_artifact_id)?;
-    ArtifactId::parse(receipt.stderr_artifact_id)?;
-    for artifact in receipt.trace_artifact_ids {
-        ArtifactId::parse(artifact)?;
-    }
-    if event.actor != "runtime-plane"
-        || event.event_id != format!("result:{}", receipt.run_id)
-        || event.aggregate_id != format!("run:{}", receipt.run_id)
-        || receipt.actual_cost_microusd != 0
-        || receipt.latency_millis > 10_000
-        || !matches!(
-            receipt.completion_reason,
-            RunCompletionReason::Success | RunCompletionReason::OutputBudgetExceeded
-        )
-    {
-        return Err(ControlError::Projection(
-            "run result crossed its provenance boundary".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_source_revision(revision: &str) -> Result<(), ControlError> {
-    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(ControlError::Projection(
-            "run result source revision is not an object ID".to_owned(),
-        ));
-    }
-    Ok(())
+    RunResultReceipt::parse_from_event(event)
+        .map(|_| ())
+        .map_err(|_| ControlError::Projection("canonical run result is invalid".to_owned()))
 }
 
 fn trace_artifacts_for_run(
@@ -876,15 +815,8 @@ fn trace_artifacts_for_run(
         .collect()
 }
 
-const fn run_completion_reason(reason: CompletionReason) -> RunCompletionReason {
-    match reason {
-        CompletionReason::Success => RunCompletionReason::Success,
-        CompletionReason::ProviderFailure => RunCompletionReason::ProviderFailure,
-        CompletionReason::OperatorInterrupt => RunCompletionReason::OperatorInterrupt,
-        CompletionReason::WallBudgetExceeded => RunCompletionReason::WallBudgetExceeded,
-        CompletionReason::OutputBudgetExceeded => RunCompletionReason::OutputBudgetExceeded,
-        CompletionReason::IoFailure => RunCompletionReason::IoFailure,
-    }
+fn run_completion_reason(reason: CompletionReason) -> RunCompletionReason {
+    reason.into()
 }
 
 fn validate_content_id<'a>(value: &'a str, namespace: &str) -> Result<&'a str, ControlError> {
@@ -1377,6 +1309,7 @@ mod tests {
         ));
 
         let result_payload = serde_json::json!({
+            "schema_version": 1,
             "run_id": "run",
             "genome_id": format!("hephaestus:genome:{}", "8".repeat(64)),
             "world_id": format!("hephaestus:world:{}", "7".repeat(64)),
