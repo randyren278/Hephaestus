@@ -7,6 +7,7 @@ mod provider;
 mod runtime;
 mod sandbox;
 mod spec;
+mod supervisor;
 
 pub use deterministic::DeterministicRuntime;
 pub use error::RuntimeError;
@@ -17,3 +18,4 @@ pub use runtime::{
 };
 pub use sandbox::{CapabilityToken, Sandbox, SandboxManager};
 pub use spec::{Budget, RunSpec};
+pub use supervisor::SupervisedRuntime;

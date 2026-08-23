@@ -1,9 +1,16 @@
-use std::{fs, process::Command, thread, time::Duration};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use hephaestus_core::authority::CapabilitySet;
 use hephaestus_runtime::{
     Budget, DeterministicRuntime, IsolationBackend, IsolationPolicy, Provider, ProviderInvocation,
-    RunSpec, RunStatus, RuntimeAdapter, RuntimeError, SandboxManager,
+    RunSnapshot, RunSpec, RunStatus, RuntimeAdapter, RuntimeError, SandboxManager,
+    SupervisedRuntime,
 };
 use tempfile::tempdir;
 
@@ -175,6 +182,240 @@ fn deterministic_runtime_starts_resumes_interrupts_and_snapshots_real_worktrees(
             .status,
         RunStatus::Interrupted
     );
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn supervisor_streams_stdin_and_reports_bounded_success_artifacts() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec_with_budget(
+        "supervised-cat",
+        repository.path(),
+        Duration::from_secs(2),
+        1_000,
+    );
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let mut runtime =
+        SupervisedRuntime::deterministic("/bin/cat", []).expect("create supervised runtime");
+    assert_eq!(runtime.provider(), Provider::Deterministic);
+    assert!(SupervisedRuntime::deterministic("", []).is_err());
+
+    let handle = runtime
+        .start(&run_spec, &sandbox, &token)
+        .expect("start supervised process");
+    assert_eq!(handle.provider, Provider::Deterministic);
+    assert!(!runtime.report_capabilities().resume);
+    let snapshot = wait_for_terminal(&mut runtime, "supervised-cat");
+    assert_eq!(snapshot.status, RunStatus::Succeeded);
+    assert_eq!(snapshot.exit_code, Some(0));
+    assert_eq!(
+        fs::read_to_string(snapshot.stdout_path).expect("read supervised stdout"),
+        run_spec.prompt()
+    );
+    assert!(
+        fs::read(snapshot.stderr_path)
+            .expect("read supervised stderr")
+            .is_empty()
+    );
+    assert!(matches!(
+        runtime.resume(&run_spec, &sandbox, &token, "checkpoint"),
+        Err(RuntimeError::Unsupported(_))
+    ));
+    assert!(runtime.start(&run_spec, &sandbox, &token).is_err());
+    sandbox.cleanup().expect("clean sandbox");
+
+    let failure_spec = spec_with_budget(
+        "supervised-failure",
+        repository.path(),
+        Duration::from_secs(2),
+        1_000,
+    );
+    let (failure_sandbox, failure_token) = manager
+        .create(&failure_spec)
+        .expect("create failure sandbox");
+    let mut failure_runtime =
+        SupervisedRuntime::deterministic("/usr/bin/false", []).expect("create failing runtime");
+    failure_runtime
+        .start(&failure_spec, &failure_sandbox, &failure_token)
+        .expect("start failing process");
+    let failure = wait_for_terminal(&mut failure_runtime, "supervised-failure");
+    assert_eq!(failure.status, RunStatus::Failed);
+    assert_ne!(failure.exit_code, Some(0));
+    failure_sandbox.cleanup().expect("clean failure sandbox");
+
+    let environment_spec = spec_with_budget(
+        "supervised-environment",
+        repository.path(),
+        Duration::from_secs(2),
+        10_000,
+    );
+    let (environment_sandbox, environment_token) = manager
+        .create(&environment_spec)
+        .expect("create environment sandbox");
+    let mut environment_runtime =
+        SupervisedRuntime::deterministic("/usr/bin/env", []).expect("create environment runtime");
+    environment_runtime
+        .start(&environment_spec, &environment_sandbox, &environment_token)
+        .expect("start environment process");
+    let environment = wait_for_terminal(&mut environment_runtime, "supervised-environment");
+    let variables = fs::read_to_string(environment.stdout_path).expect("read child environment");
+    assert!(variables.lines().all(|line| {
+        line.starts_with("HOME=") || line.starts_with("PATH=") || line.starts_with("TMPDIR=")
+    }));
+    let execution_dir = environment_sandbox.execution_dir().to_string_lossy();
+    assert!(variables.contains(&format!("HOME={execution_dir}")));
+    assert!(variables.contains(&format!("TMPDIR={execution_dir}")));
+    environment_sandbox
+        .cleanup()
+        .expect("clean environment sandbox");
+
+    let network_spec = spec("supervised-network", repository.path(), 1_000, true);
+    let (network_sandbox, network_token) = manager
+        .create(&network_spec)
+        .expect("create network sandbox");
+    assert!(matches!(
+        failure_runtime.start(&network_spec, &network_sandbox, &network_token),
+        Err(RuntimeError::CapabilityDenied)
+    ));
+    network_sandbox.cleanup().expect("clean network sandbox");
+}
+
+#[test]
+fn supervisor_rejects_unrepresentable_deadline_before_spawn() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec_with_budget(
+        "supervised-excessive-wall",
+        repository.path(),
+        Duration::MAX,
+        1_000,
+    );
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let mut runtime =
+        SupervisedRuntime::deterministic("/bin/cat", []).expect("create supervised runtime");
+    assert!(matches!(
+        runtime.start(&run_spec, &sandbox, &token),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn supervisor_enforces_combined_output_and_wall_budgets() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+
+    let output_spec = spec_with_budget(
+        "supervised-output",
+        repository.path(),
+        Duration::from_secs(2),
+        17,
+    );
+    let (output_sandbox, output_token) =
+        manager.create(&output_spec).expect("create output sandbox");
+    let mut output_runtime =
+        SupervisedRuntime::deterministic("/usr/bin/yes", []).expect("create output runtime");
+    output_runtime
+        .start(&output_spec, &output_sandbox, &output_token)
+        .expect("start output process");
+    let output = wait_for_terminal(&mut output_runtime, "supervised-output");
+    assert_eq!(output.status, RunStatus::Failed);
+    let persisted = fs::metadata(&output.stdout_path)
+        .expect("stdout metadata")
+        .len()
+        + fs::metadata(&output.stderr_path)
+            .expect("stderr metadata")
+            .len();
+    assert!(persisted <= 17);
+    output_sandbox.cleanup().expect("clean output sandbox");
+
+    let timeout_spec = spec_with_budget(
+        "supervised-timeout",
+        repository.path(),
+        Duration::from_millis(20),
+        1_000,
+    );
+    let (timeout_sandbox, timeout_token) = manager
+        .create(&timeout_spec)
+        .expect("create timeout sandbox");
+    let mut timeout_runtime = SupervisedRuntime::deterministic("/bin/sleep", ["2".to_owned()])
+        .expect("create timeout runtime");
+    timeout_runtime
+        .start(&timeout_spec, &timeout_sandbox, &timeout_token)
+        .expect("start timeout process");
+    assert_eq!(
+        wait_for_terminal(&mut timeout_runtime, "supervised-timeout").status,
+        RunStatus::TimedOut
+    );
+    timeout_sandbox.cleanup().expect("clean timeout sandbox");
+}
+
+#[test]
+fn supervisor_interrupt_waits_for_process_group_termination() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec_with_budget(
+        "supervised-interrupt",
+        repository.path(),
+        Duration::from_secs(2),
+        1_000,
+    );
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let script = sandbox.worktree().join("spawn-child");
+    fs::write(
+        &script,
+        b"#!/bin/sh\n/bin/sleep 2 &\necho $! > child.pid\nwait\n",
+    )
+    .expect("write child process fixture");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+        .expect("make child process fixture executable");
+    let mut runtime =
+        SupervisedRuntime::deterministic(&script, []).expect("create interrupt runtime");
+    runtime
+        .start(&run_spec, &sandbox, &token)
+        .expect("start interrupt process");
+    let child_pid_path = sandbox.worktree().join("child.pid");
+    for _ in 0..100 {
+        if child_pid_path.is_file() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .expect("read child PID")
+        .trim()
+        .to_owned();
+    let interrupt_started = Instant::now();
+    runtime
+        .interrupt("supervised-interrupt")
+        .expect("interrupt process");
+    assert!(interrupt_started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        runtime
+            .snapshot("supervised-interrupt")
+            .expect("snapshot interrupt")
+            .status,
+        RunStatus::Interrupted
+    );
+    assert!(
+        !Command::new("/bin/kill")
+            .args(["-0", &child_pid])
+            .output()
+            .expect("probe child process")
+            .status
+            .success()
+    );
+    assert!(runtime.interrupt("missing").is_err());
+    assert!(runtime.snapshot("missing").is_err());
     sandbox.cleanup().expect("clean sandbox");
 }
 
@@ -395,6 +636,35 @@ fn spec(
         Budget::new(Duration::from_secs(5), maximum_output_bytes, 0).expect("budget"),
     )
     .expect("RunSpec")
+}
+
+fn spec_with_budget(
+    run_id: &str,
+    repository: &std::path::Path,
+    wall: Duration,
+    maximum_output_bytes: usize,
+) -> RunSpec {
+    RunSpec::new(
+        run_id,
+        "hephaestus:genome:test",
+        "hephaestus:world:test",
+        repository,
+        "supervised prompt",
+        CapabilitySet::new(true, false),
+        Budget::new(wall, maximum_output_bytes, 0).expect("budget"),
+    )
+    .expect("RunSpec")
+}
+
+fn wait_for_terminal(runtime: &mut SupervisedRuntime, run_id: &str) -> RunSnapshot {
+    for _ in 0..400 {
+        let snapshot = runtime.snapshot(run_id).expect("snapshot supervised run");
+        if snapshot.status != RunStatus::Running {
+            return snapshot;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("supervised run did not terminate");
 }
 
 fn run_git(repository: &std::path::Path, arguments: &[&str]) {
