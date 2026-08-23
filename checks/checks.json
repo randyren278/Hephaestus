@@ -1,0 +1,24 @@
+{
+  "test_command": "cargo test --workspace --quiet",
+  "timeout_seconds": 120,
+  "coverage_floor": 95.0,
+  "critical_modules": [
+    "crates/hephaestus-core/src/authority.rs"
+  ],
+  "mutations": [
+    {
+      "id": "child-capability-escalation",
+      "file": "crates/hephaestus-core/src/authority.rs",
+      "invariant": "A child capability set never contains authority absent from its parent.",
+      "find": "        if requested.0 & !self.0 != 0 {\n            return Err(AuthorityError::CapabilityEscalation);\n        }",
+      "replace": "        if false && requested.0 & !self.0 != 0 {\n            return Err(AuthorityError::CapabilityEscalation);\n        }"
+    },
+    {
+      "id": "candidate-clears-freeze",
+      "file": "crates/hephaestus-core/src/authority.rs",
+      "invariant": "Only an external operator can clear the evolution freeze.",
+      "find": "        if !matches!(actor, Actor::Operator) {\n            return Err(AuthorityError::OperatorRequired);\n        }",
+      "replace": "        if false && !matches!(actor, Actor::Operator) {\n            return Err(AuthorityError::OperatorRequired);\n        }"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[package]
+name = "hephaestus-core"
+description = "Trust primitives for the Hephaestus evolutionary control plane"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true

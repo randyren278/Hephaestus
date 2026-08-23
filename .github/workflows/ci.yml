@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic:
+    name: Tests, coverage, docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview, rustfmt
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install coverage runner
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --all-features
+
+      - name: Tests with branch coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Per-module floor for critical modules
+        run: >-
+          python checks/coverage_gate.py
+          --manifest checks/checks.json --report lcov.info
+
+      - name: Documentation gate
+        run: >-
+          python checks/docs_gate.py --root . --min-diagrams 1
+          README.md docs/ARCHITECTURE.md
+
+  mutation:
+    name: Mutation guard
+    needs: deterministic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Break each invariant and require the suite to catch it
+        run: >-
+          python checks/mutation_guard.py
+          --manifest checks/checks.json
+          --assert-min 2
