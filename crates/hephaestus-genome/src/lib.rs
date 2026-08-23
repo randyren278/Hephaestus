@@ -8,4 +8,4 @@ mod world;
 pub use compiler::SourceFormat;
 pub use error::CompileError;
 pub use genome::{CompiledGenome, compile_genome};
-pub use world::{CompiledWorld, compile_world, ensure_comparable};
+pub use world::{CompiledWorld, WorldEvaluationPolicy, compile_world, ensure_comparable};

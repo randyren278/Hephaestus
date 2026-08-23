@@ -17,6 +17,44 @@ pub struct CompiledWorld {
     canonical_json: Vec<u8>,
     name: String,
     authority_ceiling: CapabilitySet,
+    objectives: Vec<String>,
+    evaluator_artifacts: BTreeMap<String, String>,
+    evaluation_policy: WorldEvaluationPolicy,
+}
+
+/// Immutable evaluation and promotion constraints compiled into a World.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldEvaluationPolicy {
+    maximum_cost_microusd: u64,
+    minimum_delta_bps: i64,
+    maximum_regressions: u32,
+    confidence_bps: u16,
+}
+
+impl WorldEvaluationPolicy {
+    /// Maximum aggregate candidate spend permitted by the World.
+    #[must_use]
+    pub const fn maximum_cost_microusd(self) -> u64 {
+        self.maximum_cost_microusd
+    }
+
+    /// Minimum paired improvement required for later promotion eligibility.
+    #[must_use]
+    pub const fn minimum_delta_bps(self) -> i64 {
+        self.minimum_delta_bps
+    }
+
+    /// Maximum invariant regressions permitted by the World.
+    #[must_use]
+    pub const fn maximum_regressions(self) -> u32 {
+        self.maximum_regressions
+    }
+
+    /// Required statistical confidence in basis points.
+    #[must_use]
+    pub const fn confidence_bps(self) -> u16 {
+        self.confidence_bps
+    }
 }
 
 impl CompiledWorld {
@@ -42,6 +80,24 @@ impl CompiledWorld {
     #[must_use]
     pub const fn authority_ceiling(&self) -> CapabilitySet {
         self.authority_ceiling
+    }
+
+    /// Returns the normalized objective names bound into this World.
+    #[must_use]
+    pub fn objectives(&self) -> &[String] {
+        &self.objectives
+    }
+
+    /// Resolves one evaluator or task-manifest artifact by its World-bound name.
+    #[must_use]
+    pub fn evaluator_artifact(&self, name: &str) -> Option<&str> {
+        self.evaluator_artifacts.get(name).map(String::as_str)
+    }
+
+    /// Returns immutable evaluation and promotion constraints.
+    #[must_use]
+    pub const fn evaluation_policy(&self) -> WorldEvaluationPolicy {
+        self.evaluation_policy
     }
 }
 
@@ -114,11 +170,20 @@ pub fn compile_world(
 
     let authority_ceiling = raw.authority_ceiling.capabilities();
     let canonical_json = canonical_json(&raw)?;
+    let evaluation_policy = WorldEvaluationPolicy {
+        maximum_cost_microusd: raw.laws.maximum_cost_microusd,
+        minimum_delta_bps: raw.promotion.minimum_delta_bps,
+        maximum_regressions: raw.promotion.maximum_regressions,
+        confidence_bps: raw.promotion.confidence_bps,
+    };
     Ok(CompiledWorld {
         id: content_id("world", &canonical_json),
         canonical_json,
         name: raw.name,
         authority_ceiling,
+        objectives: raw.objectives,
+        evaluator_artifacts: raw.evaluator_artifacts,
+        evaluation_policy,
     })
 }
 

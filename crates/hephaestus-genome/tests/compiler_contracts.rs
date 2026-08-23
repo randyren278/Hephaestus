@@ -223,6 +223,19 @@ fn world_compilation_protects_laws_evaluators_and_comparability() {
         baseline.authority_ceiling(),
         CapabilitySet::new(true, false)
     );
+    assert_eq!(
+        baseline.objectives(),
+        ["correctness", "cost", "latency", "reliability"]
+    );
+    assert_eq!(
+        baseline.evaluator_artifact("sealed"),
+        Some(evaluator.as_str())
+    );
+    let policy = baseline.evaluation_policy();
+    assert_eq!(policy.maximum_cost_microusd(), 5_000_000);
+    assert_eq!(policy.minimum_delta_bps(), 300);
+    assert_eq!(policy.maximum_regressions(), 0);
+    assert_eq!(policy.confidence_bps(), 9_500);
     assert_ne!(baseline.id(), changed_law.id());
     assert!(matches!(
         ensure_comparable(&baseline, &changed_law),
