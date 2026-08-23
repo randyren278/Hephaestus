@@ -583,6 +583,34 @@ mod tests {
     }
 
     #[test]
+    fn offline_supervisor_rejects_network_authority_before_launch() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let run_spec = RunSpec::new(
+            "unit-network-denied",
+            "genome",
+            "world",
+            repository.path(),
+            "deterministic fixture",
+            CapabilitySet::new(true, true),
+            Budget::new(Duration::from_secs(2), 1_000, 0).expect("budget"),
+        )
+        .expect("run specification");
+        let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+        let marker = sandbox.execution_dir().join("process-started");
+        let mut runtime = test_runtime("/usr/bin/touch", [marker.to_string_lossy().into_owned()]);
+
+        assert!(matches!(
+            runtime.start(&run_spec, &sandbox, &token),
+            Err(RuntimeError::CapabilityDenied)
+        ));
+        assert!(!marker.exists());
+        sandbox.cleanup().expect("clean sandbox");
+    }
+
+    #[test]
     fn incomplete_stdin_delivery_is_an_io_failure() {
         let repository = repository_fixture();
         let root = tempdir().expect("sandbox root");
@@ -698,9 +726,11 @@ mod tests {
             .expect("read child PID")
             .trim()
             .to_owned();
+        let interrupt_started = Instant::now();
         runtime
             .interrupt(run_spec.run_id())
             .expect("interrupt group");
+        assert!(interrupt_started.elapsed() < Duration::from_secs(2));
         let snapshot = runtime
             .snapshot(run_spec.run_id())
             .expect("snapshot interrupt");
