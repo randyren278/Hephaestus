@@ -12,6 +12,26 @@ pub struct ProviderInvocation {
 }
 
 impl ProviderInvocation {
+    /// Builds a deterministic non-shell helper invocation for isolation probes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty executable path.
+    pub fn deterministic(
+        executable: impl Into<PathBuf>,
+        arguments: impl IntoIterator<Item = String>,
+        stdin: impl AsRef<[u8]>,
+    ) -> Result<Self, RuntimeError> {
+        let executable = executable.into();
+        validate_executable(&executable)?;
+        Ok(Self {
+            provider: Provider::Deterministic,
+            program: executable,
+            arguments: arguments.into_iter().collect(),
+            stdin: stdin.as_ref().to_vec(),
+        })
+    }
+
     /// Builds the current non-interactive Codex CLI contract without invoking it.
     ///
     /// # Errors

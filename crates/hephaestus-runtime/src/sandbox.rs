@@ -43,6 +43,10 @@ impl Sandbox {
         &self.execution_dir
     }
 
+    pub(crate) fn run_root(&self) -> &Path {
+        &self.run_root
+    }
+
     /// Maximum authority granted to the worker.
     #[must_use]
     pub const fn capabilities(&self) -> CapabilitySet {

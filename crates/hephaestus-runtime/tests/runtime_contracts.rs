@@ -2,8 +2,8 @@ use std::{fs, process::Command, thread, time::Duration};
 
 use hephaestus_core::authority::CapabilitySet;
 use hephaestus_runtime::{
-    Budget, DeterministicRuntime, Provider, ProviderInvocation, RunSpec, RunStatus, RuntimeAdapter,
-    RuntimeError, SandboxManager,
+    Budget, DeterministicRuntime, IsolationBackend, IsolationPolicy, Provider, ProviderInvocation,
+    RunSpec, RunStatus, RuntimeAdapter, RuntimeError, SandboxManager,
 };
 use tempfile::tempdir;
 
@@ -32,6 +32,69 @@ fn isolated_worktrees_bind_expiring_tokens_to_one_run() {
         first.authorize(&first_token, CapabilitySet::new(true, true)),
         Err(RuntimeError::CapabilityDenied)
     ));
+
+    let protected = tempdir().expect("protected directory");
+    let protected_file = protected.path().join("canonical-secret");
+    fs::write(&protected_file, b"must remain hidden").expect("write protected fixture");
+    let policy = IsolationPolicy::detect(vec![protected.path().to_owned()]);
+    let sibling_probe = ProviderInvocation::deterministic(
+        "/bin/cat",
+        [second
+            .worktree()
+            .join("fixture.txt")
+            .to_string_lossy()
+            .into_owned()],
+        [],
+    )
+    .expect("build sibling probe");
+    match policy.backend() {
+        IsolationBackend::MacOsSeatbelt => {
+            let own_probe = ProviderInvocation::deterministic(
+                "/bin/cat",
+                [first
+                    .worktree()
+                    .join("fixture.txt")
+                    .to_string_lossy()
+                    .into_owned()],
+                [],
+            )
+            .expect("build own probe");
+            assert!(
+                policy
+                    .command(&own_probe, &first)
+                    .expect("build own sandbox command")
+                    .status()
+                    .expect("run own sandbox probe")
+                    .success()
+            );
+            assert!(
+                !policy
+                    .command(&sibling_probe, &first)
+                    .expect("build sibling sandbox command")
+                    .status()
+                    .expect("run sibling sandbox probe")
+                    .success()
+            );
+            let protected_probe = ProviderInvocation::deterministic(
+                "/bin/cat",
+                [protected_file.to_string_lossy().into_owned()],
+                [],
+            )
+            .expect("build protected probe");
+            assert!(
+                !policy
+                    .command(&protected_probe, &first)
+                    .expect("build protected sandbox command")
+                    .status()
+                    .expect("run protected sandbox probe")
+                    .success()
+            );
+        }
+        IsolationBackend::Unavailable => assert!(matches!(
+            policy.command(&sibling_probe, &first),
+            Err(RuntimeError::Unsupported(_))
+        )),
+    }
 
     first.cleanup().expect("clean first sandbox");
     second.cleanup().expect("clean second sandbox");

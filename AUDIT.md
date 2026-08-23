@@ -32,12 +32,12 @@ Baseline commit: `a48c4a5`
 - The canonical SQLite event ledger and BLAKE3 artifact store persist and verify real on-disk state.
 - Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
 - The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
-- The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths; hosted provider invocations are built but not executed without a billable permit.
-- Thirteen trust-critical modules are held to 95% coverage and 50 deliberate invariant mutations.
+- The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths. macOS hosted commands are wrapped in a live-tested deny-by-default Seatbelt policy; unsupported hosts fail closed. Hosted provider invocations are built but not executed without a billable permit.
+- Fourteen trust-critical modules are held to 95% coverage and 53 deliberate invariant mutations.
 
 ## Remaining product loop
 
-There is currently no TUI, runtime adapter, sandbox, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
+There is currently no hosted-process supervisor, TUI, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
 
 The repository is therefore an honest trust substrate with immutable compiled configuration, not yet a runnable Hephaestus product. No dead application code or theatre product tests exist because those application layers have not been written.
 

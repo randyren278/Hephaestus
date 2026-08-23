@@ -13,6 +13,7 @@
     "crates/hephaestus-ledger/src/artifact_store.rs",
     "crates/hephaestus-ledger/src/event_store.rs",
     "crates/hephaestus-runtime/src/deterministic.rs",
+    "crates/hephaestus-runtime/src/isolation.rs",
     "crates/hephaestus-runtime/src/provider.rs",
     "crates/hephaestus-runtime/src/sandbox.rs",
     "crates/hephaestus-runtime/src/spec.rs"
@@ -367,6 +368,27 @@
       "invariant": "Provider invocations always name an executable.",
       "find": "    if path.as_os_str().is_empty() {\n        return Err(RuntimeError::InvalidSpec(\"provider executable is empty\"));\n    }",
       "replace": "    if false && path.as_os_str().is_empty() {\n        return Err(RuntimeError::InvalidSpec(\"provider executable is empty\"));\n    }"
+    },
+    {
+      "id": "external-sandbox-default-allows-access",
+      "file": "crates/hephaestus-runtime/src/isolation.rs",
+      "invariant": "External provider isolation denies every operation not explicitly granted.",
+      "find": "(version 1)\\n(deny default)\\n(import \\\"system.sb\\\")",
+      "replace": "(version 1)\\n(allow default)\\n(import \\\"system.sb\\\")"
+    },
+    {
+      "id": "offline-external-sandbox-allows-network",
+      "file": "crates/hephaestus-runtime/src/isolation.rs",
+      "invariant": "A run without network authority receives an explicit OS-level network denial.",
+      "find": "    if !network {\n        profile.push_str(\"(deny network*)\\n\");\n    }",
+      "replace": "    if false && !network {\n        profile.push_str(\"(deny network*)\\n\");\n    }"
+    },
+    {
+      "id": "missing-external-sandbox-fails-open",
+      "file": "crates/hephaestus-runtime/src/isolation.rs",
+      "invariant": "Hosted worker construction fails closed when no verified OS sandbox backend exists.",
+      "find": "            IsolationBackend::Unavailable => Err(RuntimeError::Unsupported(\n                \"no verified external sandbox backend\",\n            )),",
+      "replace": "            IsolationBackend::Unavailable => Ok(\"/usr/bin/sandbox-exec\"),"
     }
   ]
 }

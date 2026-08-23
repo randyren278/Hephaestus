@@ -2,6 +2,7 @@
 
 mod deterministic;
 mod error;
+mod isolation;
 mod provider;
 mod runtime;
 mod sandbox;
@@ -9,6 +10,7 @@ mod spec;
 
 pub use deterministic::DeterministicRuntime;
 pub use error::RuntimeError;
+pub use isolation::{IsolationBackend, IsolationPolicy};
 pub use provider::ProviderInvocation;
 pub use runtime::{
     AdapterCapabilities, Provider, RunHandle, RunSnapshot, RunStatus, RuntimeAdapter,
