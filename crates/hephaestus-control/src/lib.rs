@@ -1,0 +1,14 @@
+//! Daemon-owned local control plane and versioned operator protocol.
+
+mod client;
+mod error;
+mod protocol;
+mod server;
+
+pub use client::Client;
+pub use error::ControlError;
+pub use protocol::{
+    API_VERSION, ApiError, ApiErrorCode, ApiRequest, ApiResponse, Command, GenomeRecord,
+    ResponseData,
+};
+pub use server::{ControlPlane, data_dir_from_environment};

@@ -5,6 +5,8 @@
   "critical_modules": [
     "crates/hephaestus-core/src/authority.rs",
     "crates/hephaestus-core/src/domain.rs",
+    "crates/hephaestus-control/src/client.rs",
+    "crates/hephaestus-control/src/server.rs",
     "crates/hephaestus-genome/src/compiler.rs",
     "crates/hephaestus-genome/src/genome.rs",
     "crates/hephaestus-genome/src/world.rs",
@@ -214,6 +216,83 @@
       "invariant": "Results can only be compared under the exact same World identity.",
       "find": "    if left.id != right.id {\n        return Err(CompileError::IncompatibleWorlds {\n            left: left.id.clone(),\n            right: right.id.clone(),\n        });\n    }",
       "replace": "    if false && left.id != right.id {\n        return Err(CompileError::IncompatibleWorlds {\n            left: left.id.clone(),\n            right: right.id.clone(),\n        });\n    }"
+    },
+    {
+      "id": "oversized-control-request-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The local API bounds every request before JSON deserialization.",
+      "find": "        let response = if bytes.len() > MAX_REQUEST_BYTES {",
+      "replace": "        let response = if false && bytes.len() > MAX_REQUEST_BYTES {"
+    },
+    {
+      "id": "unknown-control-api-version-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The daemon rejects local API versions it does not implement.",
+      "find": "        if request.version != API_VERSION {",
+      "replace": "        if false && request.version != API_VERSION {"
+    },
+    {
+      "id": "operator-api-authentication-bypassed",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Consequential local API commands require the owner-only operator token.",
+      "find": "        if !constant_time_equal(request.token.as_bytes(), self.token_hex.as_bytes()) {",
+      "replace": "        if false && !constant_time_equal(request.token.as_bytes(), self.token_hex.as_bytes()) {"
+    },
+    {
+      "id": "forged-control-actor-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Replayed control events must originate at the canonical operator aggregate and actor.",
+      "find": "            if event.aggregate_id != CONTROL_AGGREGATE || event.actor != OPERATOR_ACTOR {",
+      "replace": "            if false && (event.aggregate_id != CONTROL_AGGREGATE || event.actor != OPERATOR_ACTOR) {"
+    },
+    {
+      "id": "control-command-event-mismatch-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A replayed control event type must match its audited typed command.",
+      "find": "                if event_type(&recorded.command) != event.event_type {",
+      "replace": "                if false && event_type(&recorded.command) != event.event_type {"
+    },
+    {
+      "id": "persistent-freeze-event-ignored",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A canonical freeze remains engaged across process restart and replay.",
+      "find": "            \"control.freeze\" => self.freeze = FreezeState::frozen(operator_token),",
+      "replace": "            \"control.freeze\" => {}"
+    },
+    {
+      "id": "operator-unfreeze-event-ignored",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "An authenticated operator unfreeze is durable across restart.",
+      "find": "            \"control.unfreeze\" => self\n                .freeze\n                .unfreeze(operator_token)\n                .map_err(|_| ControlError::Projection(\"operator proof rejected\".to_owned()))?,",
+      "replace": "            \"control.unfreeze\" => {}"
+    },
+    {
+      "id": "kill-all-event-ignored",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Kill-all clears canonically active work and remains effective after restart.",
+      "find": "            \"control.kill_all\" => self.active_runs.clear(),",
+      "replace": "            \"control.kill_all\" => {}"
+    },
+    {
+      "id": "released-genome-metadata-overwritten",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A released Genome identity can never be replayed with different metadata.",
+      "find": "                if let Some(existing) = self.genomes.get(&genome.genome_id)\n                    && existing != &genome\n                {",
+      "replace": "                if let Some(existing) = self.genomes.get(&genome.genome_id)\n                    && existing != &genome\n                    && false\n                {"
+    },
+    {
+      "id": "inspected-genome-artifact-unverified",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Daemon startup verifies every registered Genome's canonical CAS bytes.",
+      "find": "            artifacts.get(&id)?;",
+      "replace": "            let _unverified = id;"
+    },
+    {
+      "id": "replay-divergence-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The replay command fails if fresh canonical projection differs from live state.",
+      "find": "        if replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }",
+      "replace": "        if false && replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }"
     }
   ]
 }

@@ -31,11 +31,12 @@ Baseline commit: `a48c4a5`
 - The domain vocabulary and lifecycle are executable, versioned, and fail closed.
 - The canonical SQLite event ledger and BLAKE3 artifact store persist and verify real on-disk state.
 - Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
-- Seven trust-critical modules are held to 95% coverage and 29 deliberate invariant mutations.
+- The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
+- Nine trust-critical modules are held to 95% coverage and 40 deliberate invariant mutations.
 
 ## Remaining product loop
 
-There is currently no daemon, CLI, TUI, runtime adapter, sandbox, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
+There is currently no TUI, runtime adapter, sandbox, trace pipeline, Arena, evaluator isolation, mutation engine, selection engine, lineage, promotion/rollback, Gene Bank, drift response, canary deployment, web console, public benchmark, or autonomous evolution loop.
 
 The repository is therefore an honest trust substrate with immutable compiled configuration, not yet a runnable Hephaestus product. No dead application code or theatre product tests exist because those application layers have not been written.
 

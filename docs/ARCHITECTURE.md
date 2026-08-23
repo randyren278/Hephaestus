@@ -1,6 +1,6 @@
 # Architecture
 
-The Rust workspace begins with `crates/hephaestus-core/`, which owns Laws and domain contracts, `crates/hephaestus-ledger/`, which owns canonical evidence persistence, and `crates/hephaestus-genome/`, which compiles immutable Genomes and Worlds. Other planes will be added only after their invariants have executable evidence.
+The Rust workspace begins with `crates/hephaestus-core/`, which owns Laws and domain contracts, `crates/hephaestus-ledger/`, which owns canonical evidence persistence, `crates/hephaestus-genome/`, which compiles immutable Genomes and Worlds, and `crates/hephaestus-control/`, which owns the local daemon boundary. Other planes will be added only after their invariants have executable evidence.
 
 ```mermaid
 flowchart TD
@@ -25,6 +25,10 @@ flowchart TD
     Compile --> World[Content-addressed World]
     World --> Genome[Content-addressed Genome]
     Genome --> Derive
+    CLI[Operator CLI] -->|token plus schema v1| Socket[Owner-only Unix socket]
+    Socket --> Daemon[Single-writer daemon]
+    Daemon --> Event
+    Replay --> Daemon
 ```
 
 ## Trust boundary
@@ -34,6 +38,7 @@ The authority, domain, compiler, Genome, World, event-store, and artifact-store 
 ## Repository map
 
 - `crates/hephaestus-core/` — shared trust primitives.
+- `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.
 - `checks/` — coverage, mutation, and documentation gates.

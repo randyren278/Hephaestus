@@ -1,0 +1,810 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    os::unix::{
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
+    },
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use fs2::FileExt;
+use hephaestus_core::authority::{FreezeState, OperatorToken};
+use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, GenomeRecord,
+    ResponseData,
+};
+
+const MAX_REQUEST_BYTES: usize = 65_536;
+const MAX_REQUEST_READ_BYTES: u64 = 65_537;
+const CONTROL_AGGREGATE: &str = "hephaestus-control";
+const OPERATOR_ACTOR: &str = "local-operator";
+
+/// Resolves `HEPHAESTUS_HOME`, then the conventional per-user data directory.
+///
+/// # Errors
+///
+/// Fails if neither `HEPHAESTUS_HOME` nor `HOME` names a usable directory.
+pub fn data_dir_from_environment() -> Result<PathBuf, ControlError> {
+    if let Some(path) = env::var_os("HEPHAESTUS_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".hephaestus"))
+        .ok_or(ControlError::Protocol("no data directory configured"))
+}
+
+/// Single-writer daemon state and local operator API.
+pub struct ControlPlane {
+    data_dir: PathBuf,
+    token_hex: String,
+    operator_token: OperatorToken,
+    ledger: EventStore,
+    state: ControlState,
+    _artifacts: ArtifactStore,
+    _lock: File,
+    shutdown_requested: bool,
+}
+
+impl ControlPlane {
+    /// Opens canonical storage, takes the single-writer lock, and replays state.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for unsafe storage paths, another writer, corrupt tokens,
+    /// ledger integrity failures, or invalid projection events.
+    pub fn open(data_dir: impl Into<PathBuf>) -> Result<Self, ControlError> {
+        let data_dir = data_dir.into();
+        prepare_private_directory(&data_dir)?;
+        let lock = take_writer_lock(&data_dir.join("daemon.lock"))?;
+        let (token_hex, token_bytes) = load_or_create_token(&data_dir.join("operator.token"))?;
+        let operator_token = OperatorToken::from_bytes(token_bytes);
+        let database_path = data_dir.join("events.sqlite3");
+        prepare_private_file(&database_path)?;
+        let ledger = EventStore::open(&database_path)?;
+        let artifacts_path = data_dir.join("blobs");
+        prepare_private_directory(&artifacts_path)?;
+        let artifacts = ArtifactStore::open(artifacts_path)?;
+        let history = ledger.replay_verified()?;
+        let state = ControlState::from_events(&history, &operator_token)?;
+        state.verify_genome_artifacts(&artifacts)?;
+        Ok(Self {
+            data_dir,
+            token_hex,
+            operator_token,
+            ledger,
+            state,
+            _artifacts: artifacts,
+            _lock: lock,
+            shutdown_requested: false,
+        })
+    }
+
+    /// Serves authenticated one-request connections until the process is stopped.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the socket cannot be bound securely or an accepted request cannot
+    /// be read or answered.
+    pub fn serve(mut self) -> Result<(), ControlError> {
+        let socket_path = self.data_dir.join("control.sock");
+        remove_stale_socket(&socket_path)?;
+        let listener = UnixListener::bind(&socket_path)?;
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+        for connection in listener.incoming() {
+            let mut stream = connection?;
+            let _read_timeout_error = stream.set_read_timeout(Some(Duration::from_secs(2))).err();
+            let _write_timeout_error = stream.set_write_timeout(Some(Duration::from_secs(2))).err();
+            let _connection_error = self.serve_one(&mut stream).err();
+            if self.shutdown_requested {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_one(&mut self, stream: &mut UnixStream) -> Result<(), ControlError> {
+        let mut bytes = Vec::new();
+        stream
+            .take(MAX_REQUEST_READ_BYTES)
+            .read_to_end(&mut bytes)?;
+        let response = if bytes.len() > MAX_REQUEST_BYTES {
+            ApiResponse::failure("", ApiErrorCode::InvalidRequest, "request exceeds limit")
+        } else {
+            match serde_json::from_slice::<ApiRequest>(&bytes) {
+                Ok(request) => self.handle(request),
+                Err(_) => ApiResponse::failure(
+                    "",
+                    ApiErrorCode::InvalidRequest,
+                    "request does not match the declared schema",
+                ),
+            }
+        };
+        stream.write_all(&serde_json::to_vec(&response)?)?;
+        Ok(())
+    }
+
+    fn handle(&mut self, request: ApiRequest) -> ApiResponse {
+        if request.version != API_VERSION {
+            return ApiResponse::failure(
+                request.request_id,
+                ApiErrorCode::UnsupportedVersion,
+                "unsupported API version",
+            );
+        }
+        if !constant_time_equal(request.token.as_bytes(), self.token_hex.as_bytes()) {
+            return ApiResponse::failure(
+                request.request_id,
+                ApiErrorCode::Unauthorized,
+                "authentication failed",
+            );
+        }
+
+        let request_id = request.request_id;
+        if request_id.trim().is_empty() {
+            return match self.append_audit(
+                &request_id,
+                &request.command,
+                "control.request_rejected",
+            ) {
+                Ok(()) => {
+                    ApiResponse::failure("", ApiErrorCode::InvalidRequest, "request_id is required")
+                }
+                Err(_) => {
+                    ApiResponse::failure("", ApiErrorCode::Internal, "canonical operation failed")
+                }
+            };
+        }
+        match self.execute(&request_id, request.command) {
+            Ok(data) => ApiResponse::success(request_id, data),
+            Err(ExecuteError::Invalid(message)) => {
+                ApiResponse::failure(request_id, ApiErrorCode::InvalidRequest, message)
+            }
+            Err(ExecuteError::NotFound) => ApiResponse::failure(
+                request_id,
+                ApiErrorCode::NotFound,
+                "canonical record not found",
+            ),
+            Err(ExecuteError::Internal) => ApiResponse::failure(
+                request_id,
+                ApiErrorCode::Internal,
+                "canonical operation failed",
+            ),
+        }
+    }
+
+    fn execute(
+        &mut self,
+        request_id: &str,
+        command: Command,
+    ) -> Result<ResponseData, ExecuteError> {
+        let killed_runs = if command == Command::KillAll {
+            self.state.active_runs.len()
+        } else {
+            0
+        };
+        self.append_audit(request_id, &command, event_type(&command))
+            .map_err(|_| ExecuteError::Internal)?;
+        if let Command::GenomeShow { genome_id } = &command
+            && genome_id.trim().is_empty()
+        {
+            return Err(ExecuteError::Invalid("genome_id is required"));
+        }
+
+        match command {
+            Command::Status => Ok(self.state.status()),
+            Command::Freeze | Command::Unfreeze => Ok(ResponseData::Acknowledged {
+                frozen: self.state.freeze.is_frozen(),
+                killed_runs: 0,
+            }),
+            Command::KillAll => Ok(ResponseData::Acknowledged {
+                frozen: self.state.freeze.is_frozen(),
+                killed_runs,
+            }),
+            Command::GenomeShow { genome_id } => self
+                .state
+                .genomes
+                .get(&genome_id)
+                .cloned()
+                .map(|genome| ResponseData::Genome { genome })
+                .ok_or(ExecuteError::NotFound),
+            Command::Replay => self.replay_response(),
+            Command::DaemonStop => {
+                self.shutdown_requested = true;
+                Ok(ResponseData::Acknowledged {
+                    frozen: self.state.freeze.is_frozen(),
+                    killed_runs: 0,
+                })
+            }
+        }
+    }
+
+    fn append_audit(
+        &mut self,
+        request_id: &str,
+        command: &Command,
+        event_type: &str,
+    ) -> Result<(), ExecuteError> {
+        let payload = serde_json::to_vec(&AuditedCommand {
+            request_id,
+            command,
+        })
+        .map_err(|_| ExecuteError::Internal)?;
+        let next_sequence = self.state.event_count + 1;
+        let event = self
+            .ledger
+            .append(EventInput::new(
+                format!("control:{next_sequence}:{request_id}"),
+                CONTROL_AGGREGATE,
+                event_type,
+                OPERATOR_ACTOR,
+                timestamp_millis().map_err(|_| ExecuteError::Internal)?,
+                payload,
+            ))
+            .map_err(|_| ExecuteError::Internal)?;
+        self.state
+            .apply(&event, &self.operator_token)
+            .map_err(|_| ExecuteError::Internal)?;
+        Ok(())
+    }
+
+    fn replay_response(&self) -> Result<ResponseData, ExecuteError> {
+        let history = self
+            .ledger
+            .replay_verified()
+            .map_err(|_| ExecuteError::Internal)?;
+        let replayed = ControlState::from_events(&history, &self.operator_token)
+            .map_err(|_| ExecuteError::Internal)?;
+        if replayed.snapshot() != self.state.snapshot() {
+            return Err(ExecuteError::Internal);
+        }
+        let canonical =
+            serde_json::to_vec(&replayed.snapshot()).map_err(|_| ExecuteError::Internal)?;
+        Ok(ResponseData::Replay {
+            event_count: replayed.event_count,
+            frozen: replayed.freeze.is_frozen(),
+            active_runs: replayed.active_runs.len(),
+            projection_hash: blake3::hash(&canonical).to_hex().to_string(),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct AuditedCommand<'a> {
+    request_id: &'a str,
+    command: &'a Command,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedCommand {
+    request_id: String,
+    command: Command,
+}
+
+#[derive(Debug)]
+enum ExecuteError {
+    Invalid(&'static str),
+    NotFound,
+    Internal,
+}
+
+struct ControlState {
+    freeze: FreezeState,
+    active_runs: BTreeSet<String>,
+    genomes: BTreeMap<String, GenomeRecord>,
+    event_count: u64,
+}
+
+impl ControlState {
+    fn from_events(
+        events: &[StoredEvent],
+        operator_token: &OperatorToken,
+    ) -> Result<Self, ControlError> {
+        let mut state = Self {
+            freeze: FreezeState::frozen(operator_token),
+            active_runs: BTreeSet::new(),
+            genomes: BTreeMap::new(),
+            event_count: 0,
+        };
+        for event in events {
+            state.apply(event, operator_token)?;
+        }
+        Ok(state)
+    }
+
+    fn apply(
+        &mut self,
+        event: &StoredEvent,
+        operator_token: &OperatorToken,
+    ) -> Result<(), ControlError> {
+        if event.event_type.starts_with("control.") {
+            if event.aggregate_id != CONTROL_AGGREGATE || event.actor != OPERATOR_ACTOR {
+                return Err(ControlError::Projection(
+                    "control event crossed the operator boundary".to_owned(),
+                ));
+            }
+            let recorded: RecordedCommand = serde_json::from_slice(&event.payload)?;
+            if event.event_type != "control.request_rejected" {
+                require_projection_text(&recorded.request_id, "request_id")?;
+                if event_type(&recorded.command) != event.event_type {
+                    return Err(ControlError::Projection(
+                        "control event type does not match its command".to_owned(),
+                    ));
+                }
+            }
+        }
+        match event.event_type.as_str() {
+            "control.freeze" => self.freeze = FreezeState::frozen(operator_token),
+            "control.unfreeze" => self
+                .freeze
+                .unfreeze(operator_token)
+                .map_err(|_| ControlError::Projection("operator proof rejected".to_owned()))?,
+            "control.kill_all" => self.active_runs.clear(),
+            "run.started" => {
+                let run: RunRecord = serde_json::from_slice(&event.payload)?;
+                require_projection_text(&run.run_id, "run_id")?;
+                self.active_runs.insert(run.run_id);
+            }
+            "run.completed" => {
+                let run: RunRecord = serde_json::from_slice(&event.payload)?;
+                require_projection_text(&run.run_id, "run_id")?;
+                self.active_runs.remove(&run.run_id);
+            }
+            "genome.registered" => {
+                let genome: GenomeRecord = serde_json::from_slice(&event.payload)?;
+                validate_genome_record(&genome)?;
+                if let Some(existing) = self.genomes.get(&genome.genome_id)
+                    && existing != &genome
+                {
+                    return Err(ControlError::Projection(
+                        "released Genome metadata changed".to_owned(),
+                    ));
+                }
+                self.genomes.insert(genome.genome_id.clone(), genome);
+            }
+            _ => {}
+        }
+        self.event_count = event.sequence;
+        Ok(())
+    }
+
+    fn status(&self) -> ResponseData {
+        ResponseData::Status {
+            frozen: self.freeze.is_frozen(),
+            active_runs: self.active_runs.len(),
+            event_count: self.event_count,
+            genome_count: self.genomes.len(),
+        }
+    }
+
+    fn snapshot(&self) -> ProjectionSnapshot {
+        ProjectionSnapshot {
+            frozen: self.freeze.is_frozen(),
+            active_runs: self.active_runs.iter().cloned().collect(),
+            genomes: self.genomes.clone(),
+            event_count: self.event_count,
+        }
+    }
+
+    fn verify_genome_artifacts(&self, artifacts: &ArtifactStore) -> Result<(), ControlError> {
+        for genome in self.genomes.values() {
+            let id = ArtifactId::parse(genome.artifact_id.clone())?;
+            artifacts.get(&id)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunRecord {
+    run_id: String,
+}
+
+#[derive(Eq, PartialEq, Serialize)]
+struct ProjectionSnapshot {
+    frozen: bool,
+    active_runs: Vec<String>,
+    genomes: BTreeMap<String, GenomeRecord>,
+    event_count: u64,
+}
+
+fn validate_genome_record(genome: &GenomeRecord) -> Result<(), ControlError> {
+    for (field, value) in [
+        ("genome_id", genome.genome_id.as_str()),
+        ("name", genome.name.as_str()),
+        ("world_id", genome.world_id.as_str()),
+        ("artifact_id", genome.artifact_id.as_str()),
+    ] {
+        require_projection_text(value, field)?;
+    }
+    let genome_hash = validate_content_id(&genome.genome_id, "genome")?;
+    validate_content_id(&genome.world_id, "world")?;
+    ArtifactId::parse(genome.artifact_id.clone())?;
+    if genome.artifact_id != genome_hash {
+        return Err(ControlError::Projection(
+            "Genome identity does not match its canonical artifact".to_owned(),
+        ));
+    }
+    for parent in &genome.parent_ids {
+        validate_content_id(parent, "genome")?;
+    }
+    Ok(())
+}
+
+fn validate_content_id<'a>(value: &'a str, namespace: &str) -> Result<&'a str, ControlError> {
+    let prefix = format!("hephaestus:{namespace}:");
+    let Some(hash) = value.strip_prefix(&prefix) else {
+        return Err(ControlError::Projection(format!(
+            "canonical {namespace} identity is malformed"
+        )));
+    };
+    ArtifactId::parse(hash.to_owned())?;
+    Ok(hash)
+}
+
+fn require_projection_text(value: &str, field: &str) -> Result<(), ControlError> {
+    if value.trim().is_empty() {
+        return Err(ControlError::Projection(format!(
+            "canonical {field} is empty"
+        )));
+    }
+    Ok(())
+}
+
+fn event_type(command: &Command) -> &'static str {
+    match command {
+        Command::Status => "control.status",
+        Command::Freeze => "control.freeze",
+        Command::Unfreeze => "control.unfreeze",
+        Command::KillAll => "control.kill_all",
+        Command::GenomeShow { .. } => "control.genome_show",
+        Command::Replay => "control.replay",
+        Command::DaemonStop => "control.daemon_stop",
+    }
+}
+
+fn timestamp_millis() -> Result<i64, ControlError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ControlError::Protocol("system clock precedes Unix epoch"))?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| ControlError::Protocol("timestamp exceeds i64"))
+}
+
+fn prepare_private_directory(path: &Path) -> Result<(), ControlError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ControlError::Protocol("data path cannot be a symlink"));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ControlError::Protocol("data path is not a directory"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(path)?,
+        Err(error) => return Err(error.into()),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn prepare_private_file(path: &Path) -> Result<(), ControlError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ControlError::Protocol("canonical file path is unsafe"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn take_writer_lock(path: &Path) -> Result<File, ControlError> {
+    prepare_private_file(path)?;
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    file.try_lock_exclusive()
+        .map_err(|_| ControlError::AlreadyRunning)?;
+    Ok(file)
+}
+
+fn load_or_create_token(path: &Path) -> Result<(String, [u8; 32]), ControlError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ControlError::Protocol("operator token path is unsafe"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0_u8; 32];
+            File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+            let token = hex_encode(&bytes);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(token.as_bytes())?;
+            file.sync_all()?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let token = fs::read_to_string(path)?;
+    let bytes = hex_decode(&token)?;
+    Ok((token, bytes))
+}
+
+fn hex_encode(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn hex_decode(value: &str) -> Result<[u8; 32], ControlError> {
+    if value.len() != 64 {
+        return Err(ControlError::Protocol("operator token is malformed"));
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0])?;
+        let low = hex_nibble(pair[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, ControlError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(ControlError::Protocol("operator token is malformed")),
+    }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn remove_stale_socket(path: &Path) -> Result<(), ControlError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(path)?,
+        Ok(_) => return Err(ControlError::Protocol("control socket path is unsafe")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, os::unix::fs::symlink};
+
+    use hephaestus_ledger::{EventInput, EventStore};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn authenticated_failures_are_safe_and_replay_divergence_is_detected() {
+        let directory = tempdir().expect("temporary directory");
+        let mut plane = ControlPlane::open(directory.path()).expect("open control plane");
+        let blank = plane.handle(ApiRequest {
+            version: API_VERSION,
+            request_id: String::new(),
+            token: plane.token_hex.clone(),
+            command: Command::Status,
+        });
+        assert_eq!(
+            blank.error.expect("blank request error").code,
+            ApiErrorCode::InvalidRequest
+        );
+        let missing = plane.handle(ApiRequest {
+            version: API_VERSION,
+            request_id: "missing".to_owned(),
+            token: plane.token_hex.clone(),
+            command: Command::GenomeShow {
+                genome_id: format!("hephaestus:genome:{}", "1".repeat(64)),
+            },
+        });
+        assert_eq!(
+            missing.error.expect("missing Genome error").code,
+            ApiErrorCode::NotFound
+        );
+
+        let mut competing = EventStore::open(directory.path().join("events.sqlite3"))
+            .expect("open competing store");
+        competing
+            .append(EventInput::new(
+                "competing-event",
+                "other",
+                "other.event",
+                "test",
+                1,
+                b"{}",
+            ))
+            .expect("advance canonical tail");
+        let internal = plane.handle(ApiRequest {
+            version: API_VERSION,
+            request_id: "stale-head".to_owned(),
+            token: plane.token_hex.clone(),
+            command: Command::Status,
+        });
+        assert_eq!(
+            internal.error.expect("internal error").code,
+            ApiErrorCode::Internal
+        );
+
+        let clean_directory = tempdir().expect("temporary directory");
+        let mut clean = ControlPlane::open(clean_directory.path()).expect("open clean plane");
+        clean.state.event_count = 1;
+        assert!(matches!(
+            clean.replay_response(),
+            Err(ExecuteError::Internal)
+        ));
+    }
+
+    #[test]
+    fn projection_rejects_mismatched_commands_and_mutable_genome_metadata() {
+        let token = OperatorToken::from_bytes([7; 32]);
+        let mismatched = stored_event(
+            1,
+            "control.freeze",
+            CONTROL_AGGREGATE,
+            OPERATOR_ACTOR,
+            br#"{"request_id":"mismatch","command":{"command":"unfreeze"}}"#,
+        );
+        assert!(matches!(
+            ControlState::from_events(&[mismatched], &token),
+            Err(ControlError::Projection(_))
+        ));
+
+        let hash = "2".repeat(64);
+        let first = GenomeRecord {
+            genome_id: format!("hephaestus:genome:{hash}"),
+            name: "first".to_owned(),
+            world_id: format!("hephaestus:world:{}", "3".repeat(64)),
+            artifact_id: hash,
+            parent_ids: Vec::new(),
+        };
+        let mut second = first.clone();
+        second.name = "changed".to_owned();
+        let events = [
+            stored_event(
+                1,
+                "genome.registered",
+                "genome",
+                "forge",
+                &serde_json::to_vec(&first).expect("encode first Genome"),
+            ),
+            stored_event(
+                2,
+                "genome.registered",
+                "genome",
+                "forge",
+                &serde_json::to_vec(&second).expect("encode changed Genome"),
+            ),
+        ];
+        assert!(matches!(
+            ControlState::from_events(&events, &token),
+            Err(ControlError::Projection(_))
+        ));
+
+        let lifecycle = [
+            stored_event(1, "run.started", "run", "runtime", br#"{"run_id":"r1"}"#),
+            stored_event(2, "run.completed", "run", "runtime", br#"{"run_id":"r1"}"#),
+        ];
+        let state = ControlState::from_events(&lifecycle, &token).expect("replay run lifecycle");
+        assert!(state.active_runs.is_empty());
+    }
+
+    #[test]
+    fn canonical_path_token_and_identity_helpers_fail_closed() {
+        assert!(data_dir_from_environment().is_ok());
+        assert!(!constant_time_equal(b"short", b"different"));
+        assert!(matches!(
+            hex_decode("short"),
+            Err(ControlError::Protocol(_))
+        ));
+        assert!(matches!(
+            hex_decode(&"g".repeat(64)),
+            Err(ControlError::Protocol(_))
+        ));
+
+        let directory = tempdir().expect("temporary directory");
+        let ordinary_file = directory.path().join("ordinary");
+        fs::write(&ordinary_file, b"file").expect("write ordinary file");
+        assert!(matches!(
+            prepare_private_directory(&ordinary_file),
+            Err(ControlError::Protocol(_))
+        ));
+        let link = directory.path().join("link");
+        symlink(directory.path(), &link).expect("create symlink");
+        assert!(matches!(
+            prepare_private_directory(&link),
+            Err(ControlError::Protocol(_))
+        ));
+        assert!(matches!(
+            prepare_private_file(directory.path()),
+            Err(ControlError::Protocol(_))
+        ));
+        assert!(matches!(
+            load_or_create_token(directory.path()),
+            Err(ControlError::Protocol(_))
+        ));
+        assert!(matches!(
+            remove_stale_socket(&ordinary_file),
+            Err(ControlError::Protocol(_))
+        ));
+
+        let hash = "4".repeat(64);
+        let mut genome = GenomeRecord {
+            genome_id: format!("hephaestus:genome:{hash}"),
+            name: "valid".to_owned(),
+            world_id: format!("hephaestus:world:{}", "5".repeat(64)),
+            artifact_id: "6".repeat(64),
+            parent_ids: Vec::new(),
+        };
+        assert!(matches!(
+            validate_genome_record(&genome),
+            Err(ControlError::Projection(_))
+        ));
+        genome.artifact_id = hash;
+        genome.world_id = "malformed".to_owned();
+        assert!(matches!(
+            validate_genome_record(&genome),
+            Err(ControlError::Projection(_))
+        ));
+        genome.world_id = format!("hephaestus:world:{}", "5".repeat(64));
+        genome.parent_ids = vec![" ".to_owned()];
+        assert!(validate_genome_record(&genome).is_err());
+        genome.name = " ".to_owned();
+        assert!(validate_genome_record(&genome).is_err());
+    }
+
+    fn stored_event(
+        sequence: u64,
+        event_type: &str,
+        aggregate_id: &str,
+        actor: &str,
+        payload: &[u8],
+    ) -> StoredEvent {
+        StoredEvent {
+            sequence,
+            event_id: format!("fixture-{sequence}"),
+            aggregate_id: aggregate_id.to_owned(),
+            event_type: event_type.to_owned(),
+            actor: actor.to_owned(),
+            timestamp_millis: 1,
+            payload: payload.to_vec(),
+            previous_hash: [0; 32],
+            hash: [0; 32],
+        }
+    }
+}

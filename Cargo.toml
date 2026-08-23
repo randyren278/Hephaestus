@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/hephaestus-core",
+    "crates/hephaestus-control",
     "crates/hephaestus-genome",
     "crates/hephaestus-ledger",
 ]
