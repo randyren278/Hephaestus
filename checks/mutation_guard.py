@@ -132,6 +132,20 @@ def verify_baseline(root: pathlib.Path, command: list[str], timeout: float) -> s
     return None
 
 
+def mutation_command(entry: dict, data: dict, default: list[str]) -> list[str]:
+    """Select the narrowest declared suite that owns the mutated source file."""
+    configured = data.get("mutation_test_commands", {})
+    matches = [
+        (prefix, command)
+        for prefix, command in configured.items()
+        if entry["file"].startswith(prefix)
+    ]
+    if not matches:
+        return default
+    _prefix, command = max(matches, key=lambda item: len(item[0]))
+    return shlex.split(command)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -150,11 +164,21 @@ def main(argv=None) -> int:
     parser.add_argument("--skip-baseline", action="store_true",
                         help="do not verify the unmutated suite is green first. Only for "
                              "CI where a prior job already proved it")
+    parser.add_argument("--only", action="append", default=[],
+                        help="run only this mutation ID; repeat for a focused local rerun")
     args = parser.parse_args(argv)
 
     try:
         data = load(args.manifest)
         entries = mutations(data, args.manifest)
+        if args.only:
+            requested = set(args.only)
+            known = {entry["id"] for entry in entries}
+            unknown = requested - known
+            if unknown:
+                raise ManifestError(
+                    "unknown mutation ID(s): " + ", ".join(sorted(unknown)))
+            entries = [entry for entry in entries if entry["id"] in requested]
     except ManifestError as error:
         print(f"MANIFEST ERROR: {error}", file=sys.stderr)
         return 1
@@ -181,7 +205,8 @@ def main(argv=None) -> int:
     survived = stale = timed_out = 0
     for entry in entries:
         try:
-            status, detail = apply_mutation(entry, root, command, timeout)
+            status, detail = apply_mutation(
+                entry, root, mutation_command(entry, data, command), timeout)
         except ManifestError as error:
             print(f"MANIFEST ERROR on {entry['id']}: {error}", file=sys.stderr, flush=True)
             return 1

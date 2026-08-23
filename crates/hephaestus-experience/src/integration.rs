@@ -1,11 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    collections::{BTreeMap, VecDeque},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use hephaestus_runtime::{
-    AdapterCapabilities, CapabilityToken, Provider, RunHandle, RunSnapshot, RunSpec,
-    RuntimeAdapter, RuntimeError, Sandbox,
+    AdapterCapabilities, CapabilityToken, CompletionReason, Provider, RunHandle, RunSnapshot,
+    RunSpec, RunStatus, RuntimeAdapter, RuntimeError, RuntimeObservation, RuntimeObservationKind,
+    Sandbox,
 };
 
 use crate::{EvidenceRecorder, Provenance, TraceInput, TraceKind};
@@ -15,13 +16,20 @@ pub struct RecordedRuntime<R> {
     inner: R,
     evidence: EvidenceRecorder,
     runs: BTreeMap<String, RecordedRun>,
-    completed: BTreeSet<String>,
     sequence: u64,
 }
 
 struct RecordedRun {
     provenance: Provenance,
-    started: Instant,
+    state: RecordedRunState,
+    pending_observations: VecDeque<RuntimeObservation>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecordedRunState {
+    Active,
+    Terminal,
+    ContainmentFailed,
 }
 
 impl<R> RecordedRuntime<R> {
@@ -37,44 +45,14 @@ impl<R> RecordedRuntime<R> {
             inner,
             evidence,
             runs: BTreeMap::new(),
-            completed: BTreeSet::new(),
             sequence,
         })
-    }
-
-    /// Records a provider-visible event against the immutable provenance of an active run.
-    ///
-    /// This is the ingestion boundary for tool calls/results, context metadata, memory IDs,
-    /// subagent edges, file/test activity, denials, costs, retries, and model responses.
-    /// Hidden chain-of-thought is neither requested nor accepted as a special event class.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown runs and propagates redaction, retention, or durable storage failures.
-    pub fn record_observable(
-        &mut self,
-        run_id: &str,
-        kind: TraceKind,
-        fields: BTreeMap<String, String>,
-    ) -> Result<(), RuntimeError> {
-        let provenance = self
-            .runs
-            .get(run_id)
-            .map(|run| run.provenance.clone())
-            .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
-        self.record(provenance, kind, fields)
     }
 
     /// Returns the wrapped provider-neutral runtime.
     #[must_use]
     pub const fn inner(&self) -> &R {
         &self.inner
-    }
-
-    /// Returns mutable access to the wrapped runtime for diagnostics and composition.
-    #[must_use]
-    pub const fn inner_mut(&mut self) -> &mut R {
-        &mut self.inner
     }
 
     /// Returns the durable recorder for verified replay and artifact reads.
@@ -88,6 +66,7 @@ impl<R> RecordedRuntime<R> {
         provenance: Provenance,
         kind: TraceKind,
         fields: BTreeMap<String, String>,
+        reserved_after: usize,
     ) -> Result<(), RuntimeError> {
         let timestamp_millis = unix_millis()?;
         self.sequence = self
@@ -102,7 +81,9 @@ impl<R> RecordedRuntime<R> {
         let event_id = format!("trace-{}", blake3::hash(identity.as_bytes()).to_hex());
         let input = TraceInput::new(event_id, provenance, kind, timestamp_millis, fields)
             .map_err(evidence_error)?;
-        self.evidence.record_trace(input).map_err(evidence_error)?;
+        self.evidence
+            .record_trace_reserving(input, reserved_after)
+            .map_err(evidence_error)?;
         Ok(())
     }
 
@@ -111,6 +92,7 @@ impl<R> RecordedRuntime<R> {
         provenance: Provenance,
         operation: &'static str,
         error: &RuntimeError,
+        reserved_after: usize,
     ) -> Result<(), RuntimeError> {
         let kind = if matches!(error, RuntimeError::CapabilityDenied) {
             TraceKind::CapabilityDenied
@@ -124,7 +106,76 @@ impl<R> RecordedRuntime<R> {
                 ("operation".to_owned(), operation.to_owned()),
                 ("error".to_owned(), error.to_string()),
             ]),
+            reserved_after,
         )
+    }
+
+    fn drain_observations(&mut self, run_id: &str) -> Result<(), RuntimeError>
+    where
+        R: RuntimeAdapter,
+    {
+        let observations = self.inner.drain_observations(run_id)?;
+        let provenance = self.active_provenance(run_id)?;
+        self.runs
+            .get_mut(run_id)
+            .expect("active provenance requires an existing run")
+            .pending_observations
+            .extend(observations);
+        while let Some(observation) = self
+            .runs
+            .get(run_id)
+            .and_then(|run| run.pending_observations.front())
+            .cloned()
+        {
+            self.record(
+                provenance.clone(),
+                trace_kind(observation.kind),
+                observation.fields,
+                1,
+            )?;
+            self.runs
+                .get_mut(run_id)
+                .expect("active provenance requires an existing run")
+                .pending_observations
+                .pop_front();
+        }
+        Ok(())
+    }
+
+    fn active_provenance(&self, run_id: &str) -> Result<Provenance, RuntimeError> {
+        let run = self
+            .runs
+            .get(run_id)
+            .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
+        if run.state == RecordedRunState::Terminal {
+            return Err(RuntimeError::InvalidSpec("run is not active"));
+        }
+        Ok(run.provenance.clone())
+    }
+
+    fn contain_after_evidence_failure(
+        &mut self,
+        run_id: &str,
+        evidence: RuntimeError,
+    ) -> RuntimeError
+    where
+        R: RuntimeAdapter,
+    {
+        match self.inner.interrupt(run_id) {
+            Ok(()) => {
+                self.runs.remove(run_id);
+                evidence
+            }
+            Err(interrupt) => {
+                if let Some(run) = self.runs.get_mut(run_id) {
+                    run.state = RecordedRunState::ContainmentFailed;
+                }
+                RuntimeError::ContainmentFailed {
+                    evidence: evidence.to_string(),
+                    interrupt: interrupt.to_string(),
+                }
+            }
+        }
     }
 }
 
@@ -145,10 +196,13 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
     ) -> Result<RunHandle, RuntimeError> {
         let provenance = Provenance::new(spec.run_id(), spec.genome_id(), spec.world_id())
             .map_err(evidence_error)?;
+        self.evidence
+            .ensure_capacity(spec.run_id(), 2)
+            .map_err(evidence_error)?;
         let handle = match self.inner.start(spec, sandbox, token) {
             Ok(handle) => handle,
             Err(error) => {
-                self.record_failure(provenance, "start", &error)?;
+                self.record_failure(provenance, "start", &error, 0)?;
                 return Err(error);
             }
         };
@@ -156,7 +210,8 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             spec.run_id().to_owned(),
             RecordedRun {
                 provenance: provenance.clone(),
-                started: Instant::now(),
+                state: RecordedRunState::Active,
+                pending_observations: VecDeque::new(),
             },
         );
         let fields = BTreeMap::from([
@@ -177,10 +232,11 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
                 spec.budget().wall().as_millis().to_string(),
             ),
         ]);
-        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields) {
-            let _ignored = self.inner.interrupt(spec.run_id());
-            self.runs.remove(spec.run_id());
-            return Err(error);
+        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {
+            return Err(self.contain_after_evidence_failure(spec.run_id(), error));
+        }
+        if let Err(error) = self.drain_observations(spec.run_id()) {
+            return Err(self.contain_after_evidence_failure(spec.run_id(), error));
         }
         Ok(handle)
     }
@@ -194,10 +250,25 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
     ) -> Result<RunHandle, RuntimeError> {
         let provenance = Provenance::new(spec.run_id(), spec.genome_id(), spec.world_id())
             .map_err(evidence_error)?;
+        let existing = self
+            .runs
+            .get(spec.run_id())
+            .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
+        if existing.provenance != provenance
+            || existing.state != RecordedRunState::Terminal
+            || !existing.pending_observations.is_empty()
+        {
+            return Err(RuntimeError::InvalidSpec(
+                "only the same provenance from a fully evidenced terminal run can resume",
+            ));
+        }
+        self.evidence
+            .ensure_capacity(spec.run_id(), 2)
+            .map_err(evidence_error)?;
         let handle = match self.inner.resume(spec, sandbox, token, checkpoint) {
             Ok(handle) => handle,
             Err(error) => {
-                self.record_failure(provenance, "resume", &error)?;
+                self.record_failure(provenance, "resume", &error, 0)?;
                 return Err(error);
             }
         };
@@ -205,21 +276,23 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             spec.run_id().to_owned(),
             RecordedRun {
                 provenance: provenance.clone(),
-                started: Instant::now(),
+                state: RecordedRunState::Active,
+                pending_observations: VecDeque::new(),
             },
         );
-        self.completed.remove(spec.run_id());
         if let Err(error) = self.record(
             provenance,
-            TraceKind::CheckpointCreated,
+            TraceKind::LifecycleResumed,
             BTreeMap::from([(
-                "checkpoint_hash".to_owned(),
+                "checkpoint_used_hash".to_owned(),
                 blake3::hash(checkpoint.as_bytes()).to_hex().to_string(),
             )]),
+            1,
         ) {
-            let _ignored = self.inner.interrupt(spec.run_id());
-            self.runs.remove(spec.run_id());
-            return Err(error);
+            return Err(self.contain_after_evidence_failure(spec.run_id(), error));
+        }
+        if let Err(error) = self.drain_observations(spec.run_id()) {
+            return Err(self.contain_after_evidence_failure(spec.run_id(), error));
         }
         Ok(handle)
     }
@@ -229,26 +302,21 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             .runs
             .get(run_id)
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
+        if run.state == RecordedRunState::Terminal {
+            return Ok(());
+        }
         let provenance = run.provenance.clone();
-        let latency_millis = run.started.elapsed().as_millis().to_string();
         if let Err(error) = self.inner.interrupt(run_id) {
-            self.record_failure(provenance, "interrupt", &error)?;
+            if let Err(evidence) = self.record_failure(provenance, "interrupt", &error, 1) {
+                return Err(self.contain_after_evidence_failure(run_id, evidence));
+            }
             return Err(error);
         }
-        if !self.completed.contains(run_id) {
-            self.record(
-                provenance,
-                TraceKind::LifecycleCompleted,
-                BTreeMap::from([
-                    ("status".to_owned(), "interrupted".to_owned()),
-                    (
-                        "completion_reason".to_owned(),
-                        "operator_interrupt".to_owned(),
-                    ),
-                    ("latency_millis".to_owned(), latency_millis),
-                ]),
-            )?;
-            self.completed.insert(run_id.to_owned());
+        let snapshot = self.snapshot(run_id)?;
+        if snapshot.status == RunStatus::Running {
+            return Err(RuntimeError::Evidence(
+                "interrupt returned before runtime termination".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -259,43 +327,60 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             .get(run_id)
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
         let provenance = run.provenance.clone();
-        let latency_millis = run.started.elapsed().as_millis().to_string();
+        let was_terminal = run.state == RecordedRunState::Terminal;
         let snapshot = match self.inner.snapshot(run_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.record_failure(provenance, "snapshot", &error)?;
+                if let Err(evidence) = self.record_failure(provenance, "snapshot", &error, 1) {
+                    return Err(self.contain_after_evidence_failure(run_id, evidence));
+                }
                 return Err(error);
             }
         };
-        if snapshot.status == hephaestus_runtime::RunStatus::Running {
-            self.record(
-                provenance,
-                TraceKind::CheckpointCreated,
-                BTreeMap::from([("status".to_owned(), "running".to_owned())]),
-            )?;
-        } else if !self.completed.contains(run_id) {
+        if was_terminal {
+            return Ok(snapshot);
+        }
+        if let Err(error) = self.drain_observations(run_id) {
+            if snapshot.status == RunStatus::Running {
+                return Err(self.contain_after_evidence_failure(run_id, error));
+            }
+            return Err(error);
+        }
+        if snapshot.status != RunStatus::Running {
+            let reason = snapshot.completion_reason.ok_or_else(|| {
+                RuntimeError::Evidence("terminal snapshot omitted completion reason".to_owned())
+            })?;
             let mut fields = BTreeMap::from([
                 ("status".to_owned(), format!("{:?}", snapshot.status)),
                 (
                     "completion_reason".to_owned(),
-                    completion_reason(snapshot.status).to_owned(),
+                    completion_reason(reason).to_owned(),
                 ),
-                ("latency_millis".to_owned(), latency_millis),
+                (
+                    "latency_millis".to_owned(),
+                    snapshot.elapsed.as_millis().to_string(),
+                ),
             ]);
             if let Some(exit_code) = snapshot.exit_code {
                 fields.insert("exit_code".to_owned(), exit_code.to_string());
             }
-            self.record(provenance.clone(), TraceKind::LifecycleCompleted, fields)?;
             if self.inner.provider() == Provider::Deterministic {
-                self.record(
-                    provenance,
-                    TraceKind::CostObserved,
-                    BTreeMap::from([("actual_microusd".to_owned(), "0".to_owned())]),
-                )?;
+                fields.insert("actual_cost_microusd".to_owned(), "0".to_owned());
             }
-            self.completed.insert(run_id.to_owned());
+            self.record(provenance, TraceKind::LifecycleCompleted, fields, 0)?;
+            self.runs
+                .get_mut(run_id)
+                .expect("run existence checked before snapshot")
+                .state = RecordedRunState::Terminal;
         }
         Ok(snapshot)
+    }
+
+    fn drain_observations(
+        &mut self,
+        _run_id: &str,
+    ) -> Result<Vec<hephaestus_runtime::RuntimeObservation>, RuntimeError> {
+        Ok(Vec::new())
     }
 }
 
@@ -312,13 +397,32 @@ fn unix_millis_at(now: SystemTime) -> Result<i64, RuntimeError> {
         .map_err(|_| RuntimeError::Evidence("system clock exceeds i64 milliseconds".to_owned()))
 }
 
-const fn completion_reason(status: hephaestus_runtime::RunStatus) -> &'static str {
-    match status {
-        hephaestus_runtime::RunStatus::Running => "running",
-        hephaestus_runtime::RunStatus::Succeeded => "success",
-        hephaestus_runtime::RunStatus::Failed => "provider_failure",
-        hephaestus_runtime::RunStatus::Interrupted => "operator_interrupt",
-        hephaestus_runtime::RunStatus::TimedOut => "wall_budget_exceeded",
+const fn completion_reason(reason: CompletionReason) -> &'static str {
+    match reason {
+        CompletionReason::Success => "success",
+        CompletionReason::ProviderFailure => "provider_failure",
+        CompletionReason::OperatorInterrupt => "operator_interrupt",
+        CompletionReason::WallBudgetExceeded => "wall_budget_exceeded",
+        CompletionReason::OutputBudgetExceeded => "output_budget_exceeded",
+        CompletionReason::IoFailure => "io_failure",
+    }
+}
+
+const fn trace_kind(kind: RuntimeObservationKind) -> TraceKind {
+    match kind {
+        RuntimeObservationKind::ToolCalled => TraceKind::ToolCalled,
+        RuntimeObservationKind::ToolResult => TraceKind::ToolResult,
+        RuntimeObservationKind::ContextComposed => TraceKind::ContextComposed,
+        RuntimeObservationKind::MemoryRetrieved => TraceKind::MemoryRetrieved,
+        RuntimeObservationKind::SubagentSpawned => TraceKind::SubagentSpawned,
+        RuntimeObservationKind::FileRead => TraceKind::FileRead,
+        RuntimeObservationKind::FileChanged => TraceKind::FileChanged,
+        RuntimeObservationKind::TestExecuted => TraceKind::TestExecuted,
+        RuntimeObservationKind::CostObserved => TraceKind::CostObserved,
+        RuntimeObservationKind::CheckpointCreated => TraceKind::CheckpointCreated,
+        RuntimeObservationKind::Error => TraceKind::Error,
+        RuntimeObservationKind::Retry => TraceKind::Retry,
+        RuntimeObservationKind::ModelResponse => TraceKind::ModelResponse,
     }
 }
 
@@ -341,19 +445,54 @@ mod tests {
         assert!(unix_millis_at(UNIX_EPOCH + Duration::from_secs(i64::MAX as u64)).is_err());
         assert_eq!(
             [
-                hephaestus_runtime::RunStatus::Running,
-                hephaestus_runtime::RunStatus::Succeeded,
-                hephaestus_runtime::RunStatus::Failed,
-                hephaestus_runtime::RunStatus::Interrupted,
-                hephaestus_runtime::RunStatus::TimedOut,
+                CompletionReason::Success,
+                CompletionReason::ProviderFailure,
+                CompletionReason::OperatorInterrupt,
+                CompletionReason::WallBudgetExceeded,
+                CompletionReason::OutputBudgetExceeded,
+                CompletionReason::IoFailure,
             ]
             .map(completion_reason),
             [
-                "running",
                 "success",
                 "provider_failure",
                 "operator_interrupt",
                 "wall_budget_exceeded",
+                "output_budget_exceeded",
+                "io_failure",
+            ]
+        );
+        assert_eq!(
+            [
+                RuntimeObservationKind::ToolCalled,
+                RuntimeObservationKind::ToolResult,
+                RuntimeObservationKind::ContextComposed,
+                RuntimeObservationKind::MemoryRetrieved,
+                RuntimeObservationKind::SubagentSpawned,
+                RuntimeObservationKind::FileRead,
+                RuntimeObservationKind::FileChanged,
+                RuntimeObservationKind::TestExecuted,
+                RuntimeObservationKind::CostObserved,
+                RuntimeObservationKind::CheckpointCreated,
+                RuntimeObservationKind::Error,
+                RuntimeObservationKind::Retry,
+                RuntimeObservationKind::ModelResponse,
+            ]
+            .map(trace_kind),
+            [
+                TraceKind::ToolCalled,
+                TraceKind::ToolResult,
+                TraceKind::ContextComposed,
+                TraceKind::MemoryRetrieved,
+                TraceKind::SubagentSpawned,
+                TraceKind::FileRead,
+                TraceKind::FileChanged,
+                TraceKind::TestExecuted,
+                TraceKind::CostObserved,
+                TraceKind::CheckpointCreated,
+                TraceKind::Error,
+                TraceKind::Retry,
+                TraceKind::ModelResponse,
             ]
         );
 
@@ -371,7 +510,8 @@ mod tests {
             runtime.record(
                 Provenance::new("run", "genome", "world").expect("provenance"),
                 TraceKind::Error,
-                BTreeMap::new()
+                BTreeMap::new(),
+                0
             ),
             Err(RuntimeError::Evidence(_))
         ));

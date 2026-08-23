@@ -9,6 +9,9 @@ pub enum IsolationBackend {
     MacOsSeatbelt,
     /// No verified external sandbox exists on this host.
     Unavailable,
+    /// Unit-test-only process launcher used to exercise supervisor mechanics.
+    #[cfg(test)]
+    TestOnlyUnconfined,
 }
 
 /// Immutable external filesystem and network isolation policy.
@@ -50,6 +53,13 @@ impl IsolationPolicy {
         invocation: &ProviderInvocation,
         sandbox: &Sandbox,
     ) -> Result<Command, RuntimeError> {
+        #[cfg(test)]
+        if self.backend == IsolationBackend::TestOnlyUnconfined {
+            let mut command = Command::new(invocation.program());
+            command.args(invocation.arguments());
+            command.current_dir(sandbox.worktree());
+            return Ok(command);
+        }
         let mut command = Command::new(self.launcher()?);
         let profile = self.macos_profile(invocation, sandbox)?;
         command.args(["-p", &profile]);
@@ -65,6 +75,26 @@ impl IsolationPolicy {
             IsolationBackend::Unavailable => Err(RuntimeError::Unsupported(
                 "no verified external sandbox backend",
             )),
+            #[cfg(test)]
+            IsolationBackend::TestOnlyUnconfined => Err(RuntimeError::Unsupported(
+                "test-only backend has no production launcher",
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn unconfined_for_testing() -> Self {
+        Self {
+            backend: IsolationBackend::TestOnlyUnconfined,
+            protected_paths: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn unavailable_for_testing() -> Self {
+        Self {
+            backend: IsolationBackend::Unavailable,
+            protected_paths: Vec::new(),
         }
     }
 

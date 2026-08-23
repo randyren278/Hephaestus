@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use hephaestus_core::authority::CapabilitySet;
 
@@ -52,6 +52,55 @@ pub enum RunStatus {
     TimedOut,
 }
 
+/// Supervisor-owned reason a run reached a terminal state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletionReason {
+    /// Work completed successfully inside every enforced budget.
+    Success,
+    /// The provider process or deterministic task reported failure.
+    ProviderFailure,
+    /// The operator or scheduler interrupted the run.
+    OperatorInterrupt,
+    /// The hard wall-clock deadline elapsed.
+    WallBudgetExceeded,
+    /// Combined provider output exceeded its byte ceiling.
+    OutputBudgetExceeded,
+    /// Process supervision or output persistence failed.
+    IoFailure,
+}
+
+/// Provider-owned observable event classes accepted by the evidence boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeObservationKind {
+    ToolCalled,
+    ToolResult,
+    ContextComposed,
+    MemoryRetrieved,
+    SubagentSpawned,
+    FileRead,
+    FileChanged,
+    TestExecuted,
+    CostObserved,
+    CheckpointCreated,
+    Error,
+    Retry,
+    ModelResponse,
+}
+
+/// Structured provider observation with no hidden reasoning channel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeObservation {
+    pub kind: RuntimeObservationKind,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl RuntimeObservation {
+    #[must_use]
+    pub fn new(kind: RuntimeObservationKind, fields: BTreeMap<String, String>) -> Self {
+        Self { kind, fields }
+    }
+}
+
 /// Provider-neutral observable snapshot with no private reasoning content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSnapshot {
@@ -61,6 +110,10 @@ pub struct RunSnapshot {
     pub status: RunStatus,
     /// Provider exit code when available.
     pub exit_code: Option<i32>,
+    /// Exact terminal reason, or `None` only while the run is still active.
+    pub completion_reason: Option<CompletionReason>,
+    /// Runtime-owned elapsed time, fixed when the run becomes terminal.
+    pub elapsed: Duration,
     /// Bounded provider stdout artifact.
     pub stdout_path: PathBuf,
     /// Bounded provider stderr artifact.
@@ -115,4 +168,16 @@ pub trait RuntimeAdapter {
     ///
     /// Fails for an unknown run or process/output inspection failure.
     fn snapshot(&mut self, run_id: &str) -> Result<RunSnapshot, RuntimeError>;
+
+    /// Drains provider-visible observations emitted since the previous drain.
+    ///
+    /// # Errors
+    ///
+    /// Fails for an unknown run or malformed provider event stream.
+    fn drain_observations(
+        &mut self,
+        _run_id: &str,
+    ) -> Result<Vec<RuntimeObservation>, RuntimeError> {
+        Ok(Vec::new())
+    }
 }

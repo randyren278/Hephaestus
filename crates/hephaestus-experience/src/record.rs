@@ -67,6 +67,7 @@ impl Provenance {
 #[serde(rename_all = "snake_case")]
 pub enum TraceKind {
     LifecycleStarted,
+    LifecycleResumed,
     LifecycleCompleted,
     ToolCalled,
     ToolResult,

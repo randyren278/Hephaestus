@@ -16,8 +16,9 @@ use std::{
 use hephaestus_core::authority::CapabilitySet;
 
 use crate::{
-    AdapterCapabilities, CapabilityToken, Provider, ProviderInvocation, RunHandle, RunSnapshot,
-    RunSpec, RunStatus, RuntimeAdapter, RuntimeError, Sandbox,
+    AdapterCapabilities, CapabilityToken, CompletionReason, IsolationPolicy, Provider,
+    ProviderInvocation, RunHandle, RunSnapshot, RunSpec, RunStatus, RuntimeAdapter, RuntimeError,
+    Sandbox,
 };
 
 /// Provider-neutral child-process supervisor used for non-billable local helpers.
@@ -25,6 +26,7 @@ use crate::{
 /// Hosted providers will use the same monitor after credential and hard-cost
 /// mediation are available; this constructor deliberately grants no network.
 pub struct SupervisedRuntime {
+    isolation: IsolationPolicy,
     executable: PathBuf,
     arguments: Vec<String>,
     runs: BTreeMap<String, SupervisedRun>,
@@ -49,6 +51,8 @@ struct SharedRun {
 struct ObservedRun {
     status: RunStatus,
     exit_code: Option<i32>,
+    completion_reason: Option<CompletionReason>,
+    elapsed: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -66,12 +70,14 @@ impl SupervisedRuntime {
     ///
     /// Rejects an empty executable path.
     pub fn deterministic(
+        isolation: IsolationPolicy,
         executable: impl Into<PathBuf>,
         arguments: impl IntoIterator<Item = String>,
     ) -> Result<Self, RuntimeError> {
         let executable = executable.into();
         ProviderInvocation::deterministic(&executable, [], [])?;
         Ok(Self {
+            isolation,
             executable,
             arguments: arguments.into_iter().collect(),
             runs: BTreeMap::new(),
@@ -92,7 +98,8 @@ impl SupervisedRuntime {
         if self.runs.contains_key(spec.run_id()) {
             return Err(RuntimeError::InvalidSpec("run already exists"));
         }
-        let deadline = Instant::now()
+        let started = Instant::now();
+        let deadline = started
             .checked_add(spec.budget().wall())
             .ok_or(RuntimeError::InvalidSpec("wall budget exceeds clock range"))?;
 
@@ -106,9 +113,7 @@ impl SupervisedRuntime {
             self.arguments.clone(),
             spec.prompt(),
         )?;
-        let mut command = Command::new(invocation.program());
-        command.args(invocation.arguments());
-        command.current_dir(sandbox.worktree());
+        let mut command = self.isolation.command(&invocation, sandbox)?;
         command.env_clear();
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
@@ -138,13 +143,19 @@ impl SupervisedRuntime {
             observed: Mutex::new(ObservedRun {
                 status: RunStatus::Running,
                 exit_code: None,
+                completion_reason: None,
+                elapsed: Duration::ZERO,
             }),
             changed: Condvar::new(),
             interrupt: AtomicBool::new(false),
             output_exceeded: AtomicBool::new(false),
             io_failed: AtomicBool::new(false),
         });
-        spawn_stdin_writer(child_stdin, invocation.stdin().to_vec());
+        let stdin_writer = spawn_stdin_writer(
+            child_stdin,
+            invocation.stdin().to_vec(),
+            Arc::clone(&shared),
+        );
         spawn_monitor(
             child,
             child_stdout,
@@ -153,6 +164,8 @@ impl SupervisedRuntime {
             stderr_file,
             spec.budget().maximum_output_bytes(),
             deadline,
+            started,
+            stdin_writer,
             Arc::clone(&shared),
         );
         self.runs.insert(
@@ -233,6 +246,12 @@ impl RuntimeAdapter for SupervisedRuntime {
             run_id: run_id.to_owned(),
             status: observed.status,
             exit_code: observed.exit_code,
+            completion_reason: observed.completion_reason,
+            elapsed: if observed.status == RunStatus::Running {
+                Duration::ZERO
+            } else {
+                observed.elapsed
+            },
             stdout_path: run.stdout_path.clone(),
             stderr_path: run.stderr_path.clone(),
             capabilities: run.capabilities,
@@ -240,10 +259,16 @@ impl RuntimeAdapter for SupervisedRuntime {
     }
 }
 
-fn spawn_stdin_writer(mut stdin: impl Write + Send + 'static, bytes: Vec<u8>) {
+fn spawn_stdin_writer(
+    mut stdin: impl Write + Send + 'static,
+    bytes: Vec<u8>,
+    shared: Arc<SharedRun>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let _ignored = stdin.write_all(&bytes);
-    });
+        if stdin.write_all(&bytes).is_err() {
+            shared.io_failed.store(true, Ordering::Release);
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +280,8 @@ fn spawn_monitor(
     stderr_file: File,
     maximum_output_bytes: usize,
     deadline: Instant,
+    started: Instant,
+    stdin_writer: thread::JoinHandle<()>,
     shared: Arc<SharedRun>,
 ) {
     thread::spawn(move || {
@@ -294,7 +321,10 @@ fn spawn_monitor(
             }
         };
 
-        if stdout_reader.join().is_err() || stderr_reader.join().is_err() {
+        if stdin_writer.join().is_err()
+            || stdout_reader.join().is_err()
+            || stderr_reader.join().is_err()
+        {
             shared.io_failed.store(true, Ordering::Release);
         }
         let reason = outcome.1.or_else(|| {
@@ -316,6 +346,26 @@ fn spawn_monitor(
                 },
             ),
             exit_code: outcome.0.and_then(|status| status.code()),
+            completion_reason: reason.map_or_else(
+                || {
+                    outcome.0.map(|status| {
+                        if status.success() {
+                            CompletionReason::Success
+                        } else {
+                            CompletionReason::ProviderFailure
+                        }
+                    })
+                },
+                |reason| {
+                    Some(match reason {
+                        StopReason::Interrupted => CompletionReason::OperatorInterrupt,
+                        StopReason::TimedOut => CompletionReason::WallBudgetExceeded,
+                        StopReason::OutputExceeded => CompletionReason::OutputBudgetExceeded,
+                        StopReason::IoFailed => CompletionReason::IoFailure,
+                    })
+                },
+            ),
+            elapsed: started.elapsed(),
         };
         *shared.observed.lock().expect("run state lock poisoned") = observed;
         shared.changed.notify_all();
@@ -377,9 +427,13 @@ fn status_from_exit(status: ExitStatus) -> RunStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{fs, io, os::unix::fs::PermissionsExt, process::Command, thread, time::Duration};
+
+    use hephaestus_core::authority::CapabilitySet;
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
+    use crate::{Budget, IsolationPolicy, RunSpec, SandboxManager};
 
     struct FailingReader;
 
@@ -435,11 +489,333 @@ mod tests {
         assert_eq!(arguments, ["-KILL", "--", "-123"]);
     }
 
+    #[test]
+    fn test_only_launch_path_exercises_stdin_environment_and_exit_status() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+
+        let cat_spec = spec("unit-cat", repository.path(), Duration::from_secs(2), 1_000);
+        let (cat_sandbox, cat_token) = manager.create(&cat_spec).expect("create cat sandbox");
+        let mut cat = test_runtime("/bin/cat", []);
+        cat.start(&cat_spec, &cat_sandbox, &cat_token)
+            .expect("start cat");
+        let cat_snapshot = wait_for_terminal(&mut cat, cat_spec.run_id());
+        assert_eq!(cat_snapshot.status, RunStatus::Succeeded);
+        assert_eq!(
+            cat_snapshot.completion_reason,
+            Some(CompletionReason::Success)
+        );
+        assert_eq!(
+            fs::read_to_string(cat_snapshot.stdout_path).expect("read cat output"),
+            cat_spec.prompt()
+        );
+        cat_sandbox.cleanup().expect("clean cat sandbox");
+
+        let env_spec = spec(
+            "unit-env",
+            repository.path(),
+            Duration::from_secs(2),
+            10_000,
+        );
+        let (env_sandbox, env_token) = manager.create(&env_spec).expect("create env sandbox");
+        let mut env = test_runtime("/usr/bin/env", []);
+        env.start(&env_spec, &env_sandbox, &env_token)
+            .expect("start env");
+        let variables =
+            fs::read_to_string(wait_for_terminal(&mut env, env_spec.run_id()).stdout_path)
+                .expect("read environment");
+        assert!(variables.lines().all(|line| {
+            line.starts_with("HOME=") || line.starts_with("PATH=") || line.starts_with("TMPDIR=")
+        }));
+        env_sandbox.cleanup().expect("clean env sandbox");
+
+        let failure_spec = spec(
+            "unit-failure",
+            repository.path(),
+            Duration::from_secs(2),
+            1_000,
+        );
+        let (failure_sandbox, failure_token) = manager
+            .create(&failure_spec)
+            .expect("create failure sandbox");
+        let mut failure = test_runtime("/usr/bin/false", []);
+        failure
+            .start(&failure_spec, &failure_sandbox, &failure_token)
+            .expect("start failure");
+        let failed = wait_for_terminal(&mut failure, failure_spec.run_id());
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(
+            failed.completion_reason,
+            Some(CompletionReason::ProviderFailure)
+        );
+        failure_sandbox.cleanup().expect("clean failure sandbox");
+    }
+
+    #[test]
+    fn production_launch_path_cannot_bypass_isolation_policy() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let run_spec = spec(
+            "unit-unavailable",
+            repository.path(),
+            Duration::from_secs(2),
+            1_000,
+        );
+        let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+        let marker = sandbox.execution_dir().join("process-started");
+        let mut runtime = SupervisedRuntime::deterministic(
+            IsolationPolicy::unavailable_for_testing(),
+            "/usr/bin/touch",
+            [marker.to_string_lossy().into_owned()],
+        )
+        .expect("create unavailable supervisor");
+
+        assert!(matches!(
+            runtime.start(&run_spec, &sandbox, &token),
+            Err(RuntimeError::Unsupported(_))
+        ));
+        assert!(!marker.exists());
+        sandbox.cleanup().expect("clean sandbox");
+    }
+
+    #[test]
+    fn incomplete_stdin_delivery_is_an_io_failure() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let prompt = "x".repeat(2 * 1024 * 1024);
+        let run_spec = spec_with_prompt(
+            "unit-stdin-failure",
+            repository.path(),
+            Duration::from_secs(2),
+            1_000,
+            prompt,
+        );
+        let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+        let mut runtime = test_runtime("/usr/bin/true", []);
+        runtime
+            .start(&run_spec, &sandbox, &token)
+            .expect("start early-exit child");
+        let snapshot = wait_for_terminal(&mut runtime, run_spec.run_id());
+        assert_eq!(snapshot.status, RunStatus::Failed);
+        assert_eq!(
+            snapshot.completion_reason,
+            Some(CompletionReason::IoFailure)
+        );
+        sandbox.cleanup().expect("clean sandbox");
+    }
+
+    #[test]
+    fn test_only_launch_path_exercises_output_and_wall_budgets() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let output_spec = spec("unit-output", repository.path(), Duration::from_secs(2), 17);
+        let (output_sandbox, output_token) =
+            manager.create(&output_spec).expect("create output sandbox");
+        let mut output = test_runtime("/usr/bin/yes", []);
+        output
+            .start(&output_spec, &output_sandbox, &output_token)
+            .expect("start output");
+        let exceeded = wait_for_terminal(&mut output, output_spec.run_id());
+        assert_eq!(exceeded.status, RunStatus::Failed);
+        assert_eq!(
+            exceeded.completion_reason,
+            Some(CompletionReason::OutputBudgetExceeded)
+        );
+        assert!(
+            fs::metadata(exceeded.stdout_path)
+                .expect("stdout metadata")
+                .len()
+                + fs::metadata(exceeded.stderr_path)
+                    .expect("stderr metadata")
+                    .len()
+                <= 17
+        );
+        output_sandbox.cleanup().expect("clean output sandbox");
+
+        let timeout_spec = spec(
+            "unit-timeout",
+            repository.path(),
+            Duration::from_millis(20),
+            1_000,
+        );
+        let (timeout_sandbox, timeout_token) = manager
+            .create(&timeout_spec)
+            .expect("create timeout sandbox");
+        let mut timeout = test_runtime("/bin/sleep", ["2".to_owned()]);
+        timeout
+            .start(&timeout_spec, &timeout_sandbox, &timeout_token)
+            .expect("start timeout");
+        let timed_out = wait_for_terminal(&mut timeout, timeout_spec.run_id());
+        assert_eq!(timed_out.status, RunStatus::TimedOut);
+        assert_eq!(
+            timed_out.completion_reason,
+            Some(CompletionReason::WallBudgetExceeded)
+        );
+        timeout_sandbox.cleanup().expect("clean timeout sandbox");
+    }
+
+    #[test]
+    fn test_only_launch_path_kills_descendant_process_group() {
+        let repository = repository_fixture();
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let run_spec = spec(
+            "unit-interrupt",
+            repository.path(),
+            Duration::from_secs(2),
+            1_000,
+        );
+        let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+        let script = sandbox.worktree().join("spawn-child");
+        fs::write(
+            &script,
+            b"#!/bin/sh\n/bin/sleep 4 &\necho $! > child.pid\nwait\n",
+        )
+        .expect("write process fixture");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+            .expect("make process fixture executable");
+        let mut runtime = test_runtime(&script, []);
+        runtime
+            .start(&run_spec, &sandbox, &token)
+            .expect("start process group");
+        let child_pid_path = sandbox.worktree().join("child.pid");
+        for _ in 0..100 {
+            if child_pid_path.is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let child_pid = fs::read_to_string(child_pid_path)
+            .expect("read child PID")
+            .trim()
+            .to_owned();
+        runtime
+            .interrupt(run_spec.run_id())
+            .expect("interrupt group");
+        let snapshot = runtime
+            .snapshot(run_spec.run_id())
+            .expect("snapshot interrupt");
+        assert_eq!(snapshot.status, RunStatus::Interrupted);
+        assert_eq!(
+            snapshot.completion_reason,
+            Some(CompletionReason::OperatorInterrupt)
+        );
+        assert!(
+            !Command::new("/bin/kill")
+                .args(["-0", &child_pid])
+                .output()
+                .expect("probe child")
+                .status
+                .success()
+        );
+        sandbox.cleanup().expect("clean sandbox");
+    }
+
+    fn test_runtime(
+        executable: impl Into<PathBuf>,
+        arguments: impl IntoIterator<Item = String>,
+    ) -> SupervisedRuntime {
+        SupervisedRuntime::deterministic(
+            IsolationPolicy::unconfined_for_testing(),
+            executable,
+            arguments,
+        )
+        .expect("create test supervisor")
+    }
+
+    fn wait_for_terminal(runtime: &mut SupervisedRuntime, run_id: &str) -> RunSnapshot {
+        for _ in 0..400 {
+            let snapshot = runtime.snapshot(run_id).expect("snapshot run");
+            if snapshot.status != RunStatus::Running {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("run did not become terminal");
+    }
+
+    fn spec(
+        run_id: &str,
+        repository: &std::path::Path,
+        wall: Duration,
+        maximum_output_bytes: usize,
+    ) -> RunSpec {
+        spec_with_prompt(
+            run_id,
+            repository,
+            wall,
+            maximum_output_bytes,
+            "deterministic fixture".to_owned(),
+        )
+    }
+
+    fn spec_with_prompt(
+        run_id: &str,
+        repository: &std::path::Path,
+        wall: Duration,
+        maximum_output_bytes: usize,
+        prompt: String,
+    ) -> RunSpec {
+        RunSpec::new(
+            run_id,
+            "genome",
+            "world",
+            repository,
+            prompt,
+            CapabilitySet::new(true, false),
+            Budget::new(wall, maximum_output_bytes, 0).expect("budget"),
+        )
+        .expect("run specification")
+    }
+
+    fn repository_fixture() -> TempDir {
+        let directory = tempdir().expect("repository directory");
+        run_git(directory.path(), &["init", "-q"]);
+        fs::write(directory.path().join("fixture.txt"), b"fixture\n").expect("write fixture");
+        run_git(directory.path(), &["add", "fixture.txt"]);
+        run_git(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Hephaestus Tests",
+                "-c",
+                "user.email=hephaestus@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        directory
+    }
+
+    fn run_git(repository: &std::path::Path, arguments: &[&str]) {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(arguments)
+                .status()
+                .expect("run Git fixture command")
+                .success()
+        );
+    }
+
     fn shared_run() -> Arc<SharedRun> {
         Arc::new(SharedRun {
             observed: Mutex::new(ObservedRun {
                 status: RunStatus::Running,
                 exit_code: None,
+                completion_reason: None,
+                elapsed: Duration::ZERO,
             }),
             changed: Condvar::new(),
             interrupt: AtomicBool::new(false),

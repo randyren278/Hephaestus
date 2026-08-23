@@ -3,14 +3,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 use hephaestus_core::authority::CapabilitySet;
 use serde::Serialize;
 
 use crate::{
-    AdapterCapabilities, CapabilityToken, Provider, RunHandle, RunSnapshot, RunSpec, RunStatus,
-    RuntimeAdapter, RuntimeError, Sandbox,
+    AdapterCapabilities, CapabilityToken, CompletionReason, Provider, RunHandle, RunSnapshot,
+    RunSpec, RunStatus, RuntimeAdapter, RuntimeError, RuntimeObservation, RuntimeObservationKind,
+    Sandbox,
 };
 
 /// Offline reference runtime that inventories the isolated worktree deterministically.
@@ -30,6 +32,9 @@ struct ReferenceRun {
     genome_id: String,
     world_id: String,
     prompt_hash: String,
+    started: Instant,
+    elapsed: Duration,
+    observations: Vec<RuntimeObservation>,
 }
 
 impl RuntimeAdapter for DeterministicRuntime {
@@ -52,29 +57,11 @@ impl RuntimeAdapter for DeterministicRuntime {
         sandbox: &Sandbox,
         token: &CapabilityToken,
     ) -> Result<RunHandle, RuntimeError> {
-        sandbox.authorize(token, spec.capabilities())?;
-        self.report_capabilities()
-            .authority
-            .derive_child(spec.capabilities())
-            .map_err(|_| RuntimeError::CapabilityDenied)?;
         if self.runs.contains_key(spec.run_id()) {
             return Err(RuntimeError::InvalidSpec("run already exists"));
         }
-        self.runs.insert(
-            spec.run_id().to_owned(),
-            ReferenceRun {
-                worktree: sandbox.worktree().to_owned(),
-                stdout_path: sandbox.execution_dir().join("stdout.json"),
-                stderr_path: sandbox.execution_dir().join("stderr.txt"),
-                capabilities: spec.capabilities(),
-                maximum_output_bytes: spec.budget().maximum_output_bytes(),
-                status: RunStatus::Running,
-                checkpoint: None,
-                genome_id: spec.genome_id().to_owned(),
-                world_id: spec.world_id().to_owned(),
-                prompt_hash: blake3::hash(spec.prompt().as_bytes()).to_hex().to_string(),
-            },
-        );
+        let run = reference_run(self, spec, sandbox, token, None)?;
+        self.runs.insert(spec.run_id().to_owned(), run);
         Ok(RunHandle {
             run_id: spec.run_id().to_owned(),
             provider: Provider::Deterministic,
@@ -91,13 +78,19 @@ impl RuntimeAdapter for DeterministicRuntime {
         if checkpoint.trim().is_empty() {
             return Err(RuntimeError::InvalidSpec("checkpoint is required"));
         }
-        self.runs.remove(spec.run_id());
-        let handle = self.start(spec, sandbox, token)?;
-        self.runs
-            .get_mut(spec.run_id())
-            .expect("run was inserted by start")
-            .checkpoint = Some(checkpoint.to_owned());
-        Ok(handle)
+        let existing = self
+            .runs
+            .get(spec.run_id())
+            .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
+        if existing.status == RunStatus::Running {
+            return Err(RuntimeError::InvalidSpec("running run cannot resume"));
+        }
+        let run = reference_run(self, spec, sandbox, token, Some(checkpoint))?;
+        self.runs.insert(spec.run_id().to_owned(), run);
+        Ok(RunHandle {
+            run_id: spec.run_id().to_owned(),
+            provider: Provider::Deterministic,
+        })
     }
 
     fn interrupt(&mut self, run_id: &str) -> Result<(), RuntimeError> {
@@ -106,6 +99,7 @@ impl RuntimeAdapter for DeterministicRuntime {
             .get_mut(run_id)
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
         run.status = RunStatus::Interrupted;
+        run.elapsed = run.started.elapsed();
         fs::write(&run.stderr_path, b"interrupted by supervisor\n")?;
         Ok(())
     }
@@ -116,7 +110,27 @@ impl RuntimeAdapter for DeterministicRuntime {
             .get_mut(run_id)
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
         if run.status == RunStatus::Running {
-            let output = inventory(run)?;
+            let (output, files) = inventory(run)?;
+            run.observations.extend(files.iter().map(|file| {
+                RuntimeObservation::new(
+                    RuntimeObservationKind::FileRead,
+                    BTreeMap::from([
+                        ("path".to_owned(), file.path.clone()),
+                        ("bytes".to_owned(), file.bytes.to_string()),
+                        ("blake3".to_owned(), file.blake3.clone()),
+                    ]),
+                )
+            }));
+            run.observations.push(RuntimeObservation::new(
+                RuntimeObservationKind::ModelResponse,
+                BTreeMap::from([
+                    ("output_bytes".to_owned(), output.len().to_string()),
+                    (
+                        "output_hash".to_owned(),
+                        blake3::hash(&output).to_hex().to_string(),
+                    ),
+                ]),
+            ));
             if output.len() > run.maximum_output_bytes {
                 run.status = RunStatus::Failed;
                 fs::write(&run.stderr_path, b"output budget exceeded\n")?;
@@ -125,6 +139,7 @@ impl RuntimeAdapter for DeterministicRuntime {
                 fs::write(&run.stderr_path, [])?;
                 run.status = RunStatus::Succeeded;
             }
+            run.elapsed = run.started.elapsed();
         }
         Ok(RunSnapshot {
             run_id: run_id.to_owned(),
@@ -134,11 +149,73 @@ impl RuntimeAdapter for DeterministicRuntime {
                 RunStatus::Failed => Some(1),
                 RunStatus::Running | RunStatus::Interrupted | RunStatus::TimedOut => None,
             },
+            completion_reason: match run.status {
+                RunStatus::Running => None,
+                RunStatus::Succeeded => Some(CompletionReason::Success),
+                RunStatus::Failed => Some(CompletionReason::OutputBudgetExceeded),
+                RunStatus::Interrupted => Some(CompletionReason::OperatorInterrupt),
+                RunStatus::TimedOut => Some(CompletionReason::WallBudgetExceeded),
+            },
+            elapsed: if run.status == RunStatus::Running {
+                run.started.elapsed()
+            } else {
+                run.elapsed
+            },
             stdout_path: run.stdout_path.clone(),
             stderr_path: run.stderr_path.clone(),
             capabilities: run.capabilities,
         })
     }
+
+    fn drain_observations(
+        &mut self,
+        run_id: &str,
+    ) -> Result<Vec<RuntimeObservation>, RuntimeError> {
+        let run = self
+            .runs
+            .get_mut(run_id)
+            .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
+        Ok(std::mem::take(&mut run.observations))
+    }
+}
+
+fn reference_run(
+    runtime: &DeterministicRuntime,
+    spec: &RunSpec,
+    sandbox: &Sandbox,
+    token: &CapabilityToken,
+    checkpoint: Option<&str>,
+) -> Result<ReferenceRun, RuntimeError> {
+    sandbox.authorize(token, spec.capabilities())?;
+    runtime
+        .report_capabilities()
+        .authority
+        .derive_child(spec.capabilities())
+        .map_err(|_| RuntimeError::CapabilityDenied)?;
+    Ok(ReferenceRun {
+        worktree: sandbox.worktree().to_owned(),
+        stdout_path: sandbox.execution_dir().join("stdout.json"),
+        stderr_path: sandbox.execution_dir().join("stderr.txt"),
+        capabilities: spec.capabilities(),
+        maximum_output_bytes: spec.budget().maximum_output_bytes(),
+        status: RunStatus::Running,
+        checkpoint: checkpoint.map(str::to_owned),
+        genome_id: spec.genome_id().to_owned(),
+        world_id: spec.world_id().to_owned(),
+        prompt_hash: blake3::hash(spec.prompt().as_bytes()).to_hex().to_string(),
+        started: Instant::now(),
+        elapsed: Duration::ZERO,
+        observations: vec![RuntimeObservation::new(
+            RuntimeObservationKind::ContextComposed,
+            BTreeMap::from([
+                ("prompt_bytes".to_owned(), spec.prompt().len().to_string()),
+                (
+                    "prompt_hash".to_owned(),
+                    blake3::hash(spec.prompt().as_bytes()).to_hex().to_string(),
+                ),
+            ]),
+        )],
+    })
 }
 
 #[derive(Serialize)]
@@ -151,14 +228,14 @@ struct Inventory<'a> {
     files: Vec<FileRecord>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct FileRecord {
     path: String,
     bytes: u64,
     blake3: String,
 }
 
-fn inventory(run: &ReferenceRun) -> Result<Vec<u8>, RuntimeError> {
+fn inventory(run: &ReferenceRun) -> Result<(Vec<u8>, Vec<FileRecord>), RuntimeError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(&run.worktree)
@@ -189,15 +266,16 @@ fn inventory(run: &ReferenceRun) -> Result<Vec<u8>, RuntimeError> {
             blake3: blake3::hash(&bytes).to_hex().to_string(),
         });
     }
-    serde_json::to_vec(&Inventory {
+    let output = serde_json::to_vec(&Inventory {
         schema_version: 1,
         genome_id: &run.genome_id,
         world_id: &run.world_id,
         prompt_hash: &run.prompt_hash,
         checkpoint: run.checkpoint.as_deref(),
-        files,
+        files: files.clone(),
     })
-    .map_err(|_| RuntimeError::InvalidSpec("inventory serialization failed"))
+    .map_err(|_| RuntimeError::InvalidSpec("inventory serialization failed"))?;
+    Ok((output, files))
 }
 
 fn safe_tracked_path(root: &Path, relative: &str) -> Result<PathBuf, RuntimeError> {

@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
-python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 84
+python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 100
 python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md
 ```
 

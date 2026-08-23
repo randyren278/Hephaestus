@@ -71,8 +71,20 @@ impl EvidenceRecorder {
     ///
     /// Fails before append when retention or byte ceilings are exceeded.
     pub fn record_trace(&mut self, input: TraceInput) -> Result<TraceReceipt, ExperienceError> {
+        self.record_trace_reserving(input, 0)
+    }
+
+    pub(crate) fn record_trace_reserving(
+        &mut self,
+        input: TraceInput,
+        reserved_after: usize,
+    ) -> Result<TraceReceipt, ExperienceError> {
         let history = self.events.replay_verified()?;
-        self.enforce_retention(&history, input.provenance.run_id())?;
+        self.enforce_available(
+            &history,
+            input.provenance.run_id(),
+            reserved_after.saturating_add(1),
+        )?;
         let aggregate = format!("run:{}", input.provenance.run_id());
         let redacted = self.redaction.redact(&input.fields);
         let artifact = TraceArtifact {
@@ -103,6 +115,15 @@ impl EvidenceRecorder {
         Ok(receipt)
     }
 
+    pub(crate) fn ensure_capacity(
+        &self,
+        run_id: &str,
+        required_records: usize,
+    ) -> Result<(), ExperienceError> {
+        let history = self.events.replay_verified()?;
+        self.enforce_available(&history, run_id, required_records)
+    }
+
     /// Records an unverified structured lesson linked to canonical source events.
     ///
     /// # Errors
@@ -114,7 +135,7 @@ impl EvidenceRecorder {
         input: ExperienceInput,
     ) -> Result<ExperienceReceipt, ExperienceError> {
         let history = self.events.replay_verified()?;
-        self.enforce_retention(&history, input.provenance.run_id())?;
+        self.enforce_available(&history, input.provenance.run_id(), 1)?;
         let known_events: BTreeMap<_, _> = history
             .iter()
             .map(|event| (&event.event_id, event))
@@ -199,17 +220,22 @@ impl EvidenceRecorder {
         Ok(bytes)
     }
 
-    fn enforce_retention(
+    fn enforce_available(
         &self,
         history: &[StoredEvent],
         run_id: &str,
+        required_records: usize,
     ) -> Result<(), ExperienceError> {
         let count = history
             .iter()
             .filter_map(|event| source_provenance(event).ok())
             .filter(|provenance| provenance.run_id() == run_id)
             .count();
-        if count >= self.limits.maximum_records_per_run {
+        if required_records == 0
+            || count
+                .checked_add(required_records)
+                .is_none_or(|required| required > self.limits.maximum_records_per_run)
+        {
             return Err(ExperienceError::RetentionExceeded {
                 maximum: self.limits.maximum_records_per_run,
             });

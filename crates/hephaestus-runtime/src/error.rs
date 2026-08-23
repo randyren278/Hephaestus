@@ -15,6 +15,8 @@ pub enum RuntimeError {
     Unsupported(&'static str),
     /// Required runtime evidence could not be persisted.
     Evidence(String),
+    /// Evidence failed and the runtime could not confirm containment.
+    ContainmentFailed { evidence: String, interrupt: String },
 }
 
 impl fmt::Display for RuntimeError {
@@ -31,7 +33,8 @@ impl Error for RuntimeError {
             | Self::Git(_)
             | Self::CapabilityDenied
             | Self::Unsupported(_)
-            | Self::Evidence(_) => None,
+            | Self::Evidence(_)
+            | Self::ContainmentFailed { .. } => None,
         }
     }
 }

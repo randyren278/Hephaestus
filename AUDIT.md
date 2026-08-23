@@ -1,6 +1,6 @@
 # Hephaestus Feature Audit
 
-Audit date: 2026-08-23
+Audit date: 2026-08-24
 Branch: **full-reign/2026-08-23**
 Baseline commit: `a48c4a5`
 
@@ -34,7 +34,7 @@ Baseline commit: `a48c4a5`
 - The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
 - The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths. A provider-neutral local process supervisor independently enforces allowlisted environments, stdin prompts, process-group interrupt, and hard wall/output limits. macOS hosted commands are wrapped in a live-tested deny-by-default Seatbelt policy; unsupported hosts fail closed. Hosted provider invocations are built but not executed without a billable permit.
 - The Experience Plane records the full observable trace vocabulary as bounded redacted CAS artifacts with safe ledger receipts. `RecordedRuntime` binds real adapter lifecycle, checkpoints, failures, provider-visible events, latency, and known deterministic cost to immutable run/Genome/World provenance, failing closed when required start or resume evidence cannot persist. Structured observations, hypotheses, evidence, and contradictions require verified source events and exact provenance; every lesson remains explicitly unverified and cannot become a Gene here.
-- Nineteen trust-critical modules are held to 95% coverage and 84 deliberate invariant mutations.
+- The runtime trust checkpoint requires every supervised external launch to traverse the detected OS isolation policy, records adapter-owned completion reasons and elapsed time, reserves terminal evidence capacity, and retains failed containment and unpersisted observations for retry. The current local gate holds all nineteen critical modules above 95% and kills 100 deliberate mutations.
 
 ## Remaining product loop
 

@@ -4,6 +4,12 @@ use hephaestus_core::authority::{AuthorityError, CapabilitySet, FreezeState, Ope
 fn child_capabilities_may_narrow_but_never_widen() {
     let parent = CapabilitySet::new(true, false);
 
+    assert!(parent.allows_workspace_write());
+    assert!(!parent.allows_network());
+    let networked = CapabilitySet::new(false, true);
+    assert!(!networked.allows_workspace_write());
+    assert!(networked.allows_network());
+
     assert_eq!(
         parent.derive_child(CapabilitySet::new(false, false)),
         Ok(CapabilitySet::new(false, false))

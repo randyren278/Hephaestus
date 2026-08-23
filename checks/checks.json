@@ -1,5 +1,13 @@
 {
   "test_command": "cargo test --workspace --quiet",
+  "mutation_test_commands": {
+    "crates/hephaestus-control/": "cargo test -p hephaestus-control --quiet",
+    "crates/hephaestus-core/": "cargo test -p hephaestus-core --quiet",
+    "crates/hephaestus-experience/": "cargo test -p hephaestus-experience --quiet",
+    "crates/hephaestus-genome/": "cargo test -p hephaestus-genome --quiet",
+    "crates/hephaestus-ledger/": "cargo test -p hephaestus-ledger --quiet",
+    "crates/hephaestus-runtime/": "cargo test -p hephaestus-runtime --quiet"
+  },
   "timeout_seconds": 120,
   "coverage_floor": 95.0,
   "critical_modules": [
@@ -350,8 +358,8 @@
       "id": "reference-runtime-network-authority-widened",
       "file": "crates/hephaestus-runtime/src/deterministic.rs",
       "invariant": "The offline reference runtime cannot receive network authority.",
-      "find": "        self.report_capabilities()\n            .authority\n            .derive_child(spec.capabilities())\n            .map_err(|_| RuntimeError::CapabilityDenied)?;",
-      "replace": "        self.report_capabilities()\n            .authority\n            .derive_child(spec.capabilities())\n            .ok();"
+      "find": "    runtime\n        .report_capabilities()\n        .authority\n        .derive_child(spec.capabilities())\n        .map_err(|_| RuntimeError::CapabilityDenied)?;",
+      "replace": "    runtime\n        .report_capabilities()\n        .authority\n        .derive_child(spec.capabilities())\n        .ok();"
     },
     {
       "id": "runtime-output-budget-bypassed",
@@ -359,6 +367,20 @@
       "invariant": "Provider output exceeding the hard byte budget fails the run.",
       "find": "            if output.len() > run.maximum_output_bytes {",
       "replace": "            if false && output.len() > run.maximum_output_bytes {"
+    },
+    {
+      "id": "reference-runtime-running-resume-accepted",
+      "file": "crates/hephaestus-runtime/src/deterministic.rs",
+      "invariant": "An active deterministic run cannot be silently replaced by resume.",
+      "find": "        if existing.status == RunStatus::Running {\n            return Err(RuntimeError::InvalidSpec(\"running run cannot resume\"));\n        }",
+      "replace": "        if false && existing.status == RunStatus::Running {\n            return Err(RuntimeError::InvalidSpec(\"running run cannot resume\"));\n        }"
+    },
+    {
+      "id": "reference-runtime-failed-resume-destroys-run",
+      "file": "crates/hephaestus-runtime/src/deterministic.rs",
+      "invariant": "Resume validates completely before replacing the prior deterministic run.",
+      "find": "        let run = reference_run(self, spec, sandbox, token, Some(checkpoint))?;",
+      "replace": "        self.runs.remove(spec.run_id());\n        let run = reference_run(self, spec, sandbox, token, Some(checkpoint))?;"
     },
     {
       "id": "provider-sandbox-authority-mismatch-accepted",
@@ -413,8 +435,15 @@
       "id": "supervisor-prompt-omitted-from-stdin",
       "file": "crates/hephaestus-runtime/src/supervisor.rs",
       "invariant": "The exact prompt reaches the provider only through child stdin.",
-      "find": "        spawn_stdin_writer(child_stdin, invocation.stdin().to_vec());",
-      "replace": "        spawn_stdin_writer(child_stdin, Vec::new());"
+      "find": "            invocation.stdin().to_vec(),",
+      "replace": "            Vec::new(),"
+    },
+    {
+      "id": "supervisor-stdin-delivery-failure-ignored",
+      "file": "crates/hephaestus-runtime/src/supervisor.rs",
+      "invariant": "A child that does not receive the complete prompt cannot be reported as successful.",
+      "find": "        if stdin.write_all(&bytes).is_err() {\n            shared.io_failed.store(true, Ordering::Release);\n        }",
+      "replace": "        let _ignored = stdin.write_all(&bytes);"
     },
     {
       "id": "supervisor-process-group-disabled",
@@ -448,8 +477,15 @@
       "id": "supervisor-wall-deadline-overflows",
       "file": "crates/hephaestus-runtime/src/supervisor.rs",
       "invariant": "An unrepresentable wall deadline is rejected before any child process starts.",
-      "find": "        let deadline = Instant::now()\n            .checked_add(spec.budget().wall())\n            .ok_or(RuntimeError::InvalidSpec(\"wall budget exceeds clock range\"))?;",
-      "replace": "        let deadline = Instant::now() + spec.budget().wall();"
+      "find": "        let deadline = started\n            .checked_add(spec.budget().wall())\n            .ok_or(RuntimeError::InvalidSpec(\"wall budget exceeds clock range\"))?;",
+      "replace": "        let deadline = started + spec.budget().wall();"
+    },
+    {
+      "id": "supervisor-isolation-policy-bypassed",
+      "file": "crates/hephaestus-runtime/src/supervisor.rs",
+      "invariant": "Every external process launch is constructed through the mandatory isolation policy.",
+      "find": "        let mut command = self.isolation.command(&invocation, sandbox)?;",
+      "replace": "        let mut command = Command::new(invocation.program());\n        command.args(invocation.arguments());\n        command.current_dir(sandbox.worktree());"
     },
     {
       "id": "supervisor-group-signal-misparsed",
@@ -483,8 +519,15 @@
       "id": "experience-retention-ceiling-ignored",
       "file": "crates/hephaestus-experience/src/recorder.rs",
       "invariant": "Restart-stable combined trace and experience counts cannot exceed the per-run ceiling.",
-      "find": "        if count >= self.limits.maximum_records_per_run {",
-      "replace": "        if false && count >= self.limits.maximum_records_per_run {"
+      "find": "|required| required > self.limits.maximum_records_per_run",
+      "replace": "|required| false && required > self.limits.maximum_records_per_run"
+    },
+    {
+      "id": "terminal-evidence-slot-not-reserved",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Non-terminal observations cannot consume the slot reserved for terminal lifecycle evidence.",
+      "find": "            reserved_after.saturating_add(1),",
+      "replace": "            1,"
     },
     {
       "id": "oversized-experience-artifact-accepted",
@@ -560,14 +603,14 @@
       "id": "recorded-runtime-start-evidence-optional",
       "file": "crates/hephaestus-experience/src/integration.rs",
       "invariant": "A successfully started runtime is interrupted and hidden if its required start evidence cannot persist.",
-      "find": "        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields) {\n            let _ignored = self.inner.interrupt(spec.run_id());\n            self.runs.remove(spec.run_id());\n            return Err(error);\n        }",
-      "replace": "        let _ignored_evidence = self.record(provenance, TraceKind::LifecycleStarted, fields);"
+      "find": "        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {\n            return Err(self.contain_after_evidence_failure(spec.run_id(), error));\n        }",
+      "replace": "        let _ignored_evidence = self.record(provenance, TraceKind::LifecycleStarted, fields, 1);"
     },
     {
       "id": "recorded-runtime-start-failure-unobserved",
       "file": "crates/hephaestus-experience/src/integration.rs",
       "invariant": "Generic adapter start failures produce canonical error evidence.",
-      "find": "            Err(error) => {\n                self.record_failure(provenance, \"start\", &error)?;\n                return Err(error);\n            }",
+      "find": "            Err(error) => {\n                self.record_failure(provenance, \"start\", &error, 0)?;\n                return Err(error);\n            }",
       "replace": "            Err(error) => return Err(error),"
     },
     {
@@ -578,32 +621,46 @@
       "replace": "                checkpoint.to_owned(),"
     },
     {
-      "id": "recorded-runtime-resume-evidence-optional",
+      "id": "recorded-runtime-resume-observations-optional",
       "file": "crates/hephaestus-experience/src/integration.rs",
-      "invariant": "A resumed runtime is interrupted and hidden when checkpoint evidence cannot persist.",
-      "find": "        ) {\n            let _ignored = self.inner.interrupt(spec.run_id());\n            self.runs.remove(spec.run_id());\n            return Err(error);\n        }\n        Ok(handle)\n    }",
-      "replace": "        ) {\n            return Err(error);\n        }\n        Ok(handle)\n    }"
+      "invariant": "A resumed runtime is interrupted and hidden when its required observations cannot persist.",
+      "find": "        if let Err(error) = self.drain_observations(spec.run_id()) {\n            return Err(self.contain_after_evidence_failure(spec.run_id(), error));\n        }\n        Ok(handle)\n    }\n\n    fn interrupt",
+      "replace": "        if let Err(error) = self.drain_observations(spec.run_id()) {\n            return Err(error);\n        }\n        Ok(handle)\n    }\n\n    fn interrupt"
+    },
+    {
+      "id": "recorded-runtime-active-resume-accepted",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Only a fully evidenced terminal wrapper state can be replaced by resume.",
+      "find": "            || existing.state != RecordedRunState::Terminal\n            || !existing.pending_observations.is_empty()",
+      "replace": "            || false && existing.state != RecordedRunState::Terminal\n            || false && !existing.pending_observations.is_empty()"
+    },
+    {
+      "id": "recorded-runtime-resume-provenance-spliced",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Resume cannot splice a different Genome or World provenance into an existing run identity.",
+      "find": "        if existing.provenance != provenance\n            || existing.state != RecordedRunState::Terminal",
+      "replace": "        if false && existing.provenance != provenance\n            || existing.state != RecordedRunState::Terminal"
     },
     {
       "id": "recorded-runtime-interrupt-completion-omitted",
       "file": "crates/hephaestus-experience/src/integration.rs",
       "invariant": "An active interrupt emits exactly one canonical terminal lifecycle reason.",
-      "find": "        if !self.completed.contains(run_id) {\n            self.record(\n                provenance,\n                TraceKind::LifecycleCompleted,",
-      "replace": "        if false && !self.completed.contains(run_id) {\n            self.record(\n                provenance,\n                TraceKind::LifecycleCompleted,"
+      "find": "        let snapshot = self.snapshot(run_id)?;\n        if snapshot.status == RunStatus::Running {",
+      "replace": "        return Ok(());\n        #[allow(unreachable_code)]\n        let snapshot = self.snapshot(run_id)?;\n        if snapshot.status == RunStatus::Running {"
     },
     {
-      "id": "recorded-runtime-running-checkpoint-omitted",
+      "id": "recorded-runtime-running-poll-completed",
       "file": "crates/hephaestus-experience/src/integration.rs",
-      "invariant": "Explicit running snapshots become provenance-bound checkpoint evidence.",
-      "find": "        if snapshot.status == hephaestus_runtime::RunStatus::Running {",
-      "replace": "        if false && snapshot.status == hephaestus_runtime::RunStatus::Running {"
+      "invariant": "Polling a running adapter cannot forge terminal lifecycle evidence or consume retention.",
+      "find": "        if snapshot.status != RunStatus::Running {",
+      "replace": "        if true {"
     },
     {
       "id": "recorded-runtime-terminal-duplicated",
       "file": "crates/hephaestus-experience/src/integration.rs",
       "invariant": "Repeated terminal snapshots cannot duplicate completion or cost evidence.",
-      "find": "        } else if !self.completed.contains(run_id) {",
-      "replace": "        } else {"
+      "find": "        if was_terminal {\n            return Ok(snapshot);\n        }",
+      "replace": "        if false && was_terminal {\n            return Ok(snapshot);\n        }"
     },
     {
       "id": "recorded-runtime-zero-cost-unattributed",
@@ -611,6 +668,69 @@
       "invariant": "Deterministic offline runs explicitly attribute their known zero provider cost.",
       "find": "            if self.inner.provider() == Provider::Deterministic {",
       "replace": "            if false && self.inner.provider() == Provider::Deterministic {"
+    },
+    {
+      "id": "recorded-runtime-observations-discarded",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Provider-visible observations cross the evidence boundary before lifecycle completion.",
+      "find": "            .pending_observations\n            .extend(observations);",
+      "replace": "            .pending_observations\n            .extend(Vec::new());"
+    },
+    {
+      "id": "recorded-runtime-wrapper-drain-bypassed",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Callers cannot drain provider observations around the mandatory evidence boundary.",
+      "find": "    fn drain_observations(\n        &mut self,\n        _run_id: &str,\n    ) -> Result<Vec<hephaestus_runtime::RuntimeObservation>, RuntimeError> {\n        Ok(Vec::new())\n    }",
+      "replace": "    fn drain_observations(\n        &mut self,\n        run_id: &str,\n    ) -> Result<Vec<hephaestus_runtime::RuntimeObservation>, RuntimeError> {\n        self.inner.drain_observations(run_id)\n    }"
+    },
+    {
+      "id": "recorded-runtime-completion-reason-forged",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Terminal evidence records the runtime-owned completion reason without inference.",
+      "find": "                    completion_reason(reason).to_owned(),",
+      "replace": "                    completion_reason(CompletionReason::Success).to_owned(),"
+    },
+    {
+      "id": "recorded-runtime-latency-zeroed",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Terminal evidence records runtime-owned elapsed time rather than wrapper overhead.",
+      "find": "                    snapshot.elapsed.as_millis().to_string(),",
+      "replace": "                    \"0\".to_owned(),"
+    },
+    {
+      "id": "recorded-runtime-terminal-state-premature",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "A run becomes terminal in wrapper state only after terminal evidence persists.",
+      "find": "            self.record(provenance, TraceKind::LifecycleCompleted, fields, 0)?;\n            self.runs",
+      "replace": "            self.runs.get_mut(run_id).expect(\"run exists\").state = RecordedRunState::Terminal;\n            self.record(provenance, TraceKind::LifecycleCompleted, fields, 0)?;\n            self.runs"
+    },
+    {
+      "id": "recorded-runtime-containment-failure-forgotten",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "A failed cleanup remains addressable for a later containment retry.",
+      "find": "                if let Some(run) = self.runs.get_mut(run_id) {\n                    run.state = RecordedRunState::ContainmentFailed;\n                }",
+      "replace": "                self.runs.remove(run_id);"
+    },
+    {
+      "id": "recorded-runtime-pending-observation-forgotten",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "A drained observation remains pending until its canonical append succeeds.",
+      "find": "            self.record(\n                provenance.clone(),\n                trace_kind(observation.kind),\n                observation.fields,\n                1,\n            )?;\n            self.runs",
+      "replace": "            self.runs.get_mut(run_id).expect(\"run exists\").pending_observations.pop_front();\n            self.record(\n                provenance.clone(),\n                trace_kind(observation.kind),\n                observation.fields,\n                1,\n            )?;\n            self.runs"
+    },
+    {
+      "id": "recorded-runtime-snapshot-evidence-failure-uncontained",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Failure to persist a snapshot error triggers containment of possibly active work.",
+      "find": "                if let Err(evidence) = self.record_failure(provenance, \"snapshot\", &error, 1) {\n                    return Err(self.contain_after_evidence_failure(run_id, evidence));\n                }",
+      "replace": "                if let Err(evidence) = self.record_failure(provenance, \"snapshot\", &error, 1) {\n                    return Err(evidence);\n                }"
+    },
+    {
+      "id": "recorded-runtime-interrupt-evidence-failure-uncontained",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Failure to persist an interrupt error retains or terminates the still-active run.",
+      "find": "            if let Err(evidence) = self.record_failure(provenance, \"interrupt\", &error, 1) {\n                return Err(self.contain_after_evidence_failure(run_id, evidence));\n            }",
+      "replace": "            if let Err(evidence) = self.record_failure(provenance, \"interrupt\", &error, 1) {\n                return Err(evidence);\n            }"
     }
   ]
 }

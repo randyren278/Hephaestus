@@ -14,6 +14,7 @@ fn traces_cover_observable_runtime_events_and_redact_before_persistence() {
     let provenance = provenance();
     let kinds = [
         TraceKind::LifecycleStarted,
+        TraceKind::LifecycleResumed,
         TraceKind::LifecycleCompleted,
         TraceKind::ToolCalled,
         TraceKind::ToolResult,
@@ -70,7 +71,7 @@ fn traces_cover_observable_runtime_events_and_redact_before_persistence() {
     }
 
     let history = recorder.replay_verified().expect("verified trace history");
-    assert_eq!(history.len(), 16);
+    assert_eq!(history.len(), 17);
     assert!(history.iter().all(|event| {
         event.event_type == "trace.recorded"
             && event.aggregate_id == "run:run-1"

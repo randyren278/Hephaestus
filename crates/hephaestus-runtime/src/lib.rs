@@ -14,7 +14,8 @@ pub use error::RuntimeError;
 pub use isolation::{IsolationBackend, IsolationPolicy};
 pub use provider::ProviderInvocation;
 pub use runtime::{
-    AdapterCapabilities, Provider, RunHandle, RunSnapshot, RunStatus, RuntimeAdapter,
+    AdapterCapabilities, CompletionReason, Provider, RunHandle, RunSnapshot, RunStatus,
+    RuntimeAdapter, RuntimeObservation, RuntimeObservationKind,
 };
 pub use sandbox::{CapabilityToken, Sandbox, SandboxManager};
 pub use spec::{Budget, RunSpec};
