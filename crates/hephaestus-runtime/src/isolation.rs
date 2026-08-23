@@ -125,11 +125,13 @@ fn quote_path(path: &std::path::Path) -> Result<String, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, process::Command, time::Duration};
 
+    use hephaestus_core::authority::CapabilitySet;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::{Budget, RunSpec, SandboxManager};
 
     #[test]
     fn seatbelt_profile_is_deny_by_default_and_capability_exact() {
@@ -172,5 +174,64 @@ mod tests {
             policy.launcher(),
             Err(RuntimeError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn seatbelt_command_construction_is_testable_on_every_host() {
+        let repository = tempdir().expect("repository directory");
+        run_git(repository.path(), &["init", "-q"]);
+        fs::write(repository.path().join("fixture.txt"), b"fixture\n")
+            .expect("write repository fixture");
+        run_git(repository.path(), &["add", "fixture.txt"]);
+        run_git(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=Hephaestus Tests",
+                "-c",
+                "user.email=hephaestus@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        let root = tempdir().expect("sandbox root");
+        let manager = SandboxManager::open(root.path(), Duration::from_secs(30))
+            .expect("open sandbox manager");
+        let spec = RunSpec::new(
+            "policy-construction",
+            "genome",
+            "world",
+            repository.path(),
+            "test the policy constructor",
+            CapabilitySet::new(true, false),
+            Budget::new(Duration::from_secs(5), 1_000, 0).expect("budget"),
+        )
+        .expect("run specification");
+        let (sandbox, _token) = manager.create(&spec).expect("create sandbox");
+        let invocation =
+            ProviderInvocation::deterministic("/bin/cat", [], []).expect("provider invocation");
+        let policy = IsolationPolicy {
+            backend: IsolationBackend::MacOsSeatbelt,
+            protected_paths: vec![repository.path().to_owned()],
+        };
+
+        let command = policy
+            .command(&invocation, &sandbox)
+            .expect("construct Seatbelt command");
+        assert_eq!(command.get_program(), "/usr/bin/sandbox-exec");
+        assert_eq!(command.get_current_dir(), Some(sandbox.worktree()));
+        assert!(command.get_args().any(|argument| argument == "-p"));
+        sandbox.cleanup().expect("clean sandbox");
+    }
+
+    fn run_git(repository: &std::path::Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .status()
+            .expect("run Git fixture command");
+        assert!(status.success());
     }
 }
