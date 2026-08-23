@@ -50,6 +50,18 @@ impl CapabilitySet {
 
         Ok(requested)
     }
+
+    /// Reports whether workspace mutation is authorized.
+    #[must_use]
+    pub const fn allows_workspace_write(self) -> bool {
+        self.0 & Self::WORKSPACE_WRITE != 0
+    }
+
+    /// Reports whether outbound network access is authorized.
+    #[must_use]
+    pub const fn allows_network(self) -> bool {
+        self.0 & Self::NETWORK != 0
+    }
 }
 
 /// Persistent operator freeze state.

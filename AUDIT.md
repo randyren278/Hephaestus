@@ -32,7 +32,8 @@ Baseline commit: `a48c4a5`
 - The canonical SQLite event ledger and BLAKE3 artifact store persist and verify real on-disk state.
 - Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
 - The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
-- Nine trust-critical modules are held to 95% coverage and 40 deliberate invariant mutations.
+- The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths; hosted provider invocations are built but not executed without a billable permit.
+- Thirteen trust-critical modules are held to 95% coverage and 50 deliberate invariant mutations.
 
 ## Remaining product loop
 

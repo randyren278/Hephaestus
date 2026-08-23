@@ -11,7 +11,11 @@
     "crates/hephaestus-genome/src/genome.rs",
     "crates/hephaestus-genome/src/world.rs",
     "crates/hephaestus-ledger/src/artifact_store.rs",
-    "crates/hephaestus-ledger/src/event_store.rs"
+    "crates/hephaestus-ledger/src/event_store.rs",
+    "crates/hephaestus-runtime/src/deterministic.rs",
+    "crates/hephaestus-runtime/src/provider.rs",
+    "crates/hephaestus-runtime/src/sandbox.rs",
+    "crates/hephaestus-runtime/src/spec.rs"
   ],
   "mutations": [
     {
@@ -293,6 +297,76 @@
       "invariant": "The replay command fails if fresh canonical projection differs from live state.",
       "find": "        if replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }",
       "replace": "        if false && replayed.snapshot() != self.state.snapshot() {\n            return Err(ExecuteError::Internal);\n        }"
+    },
+    {
+      "id": "workspace-capability-report-inverted",
+      "file": "crates/hephaestus-core/src/authority.rs",
+      "invariant": "Runtime adapters receive the exact compiled workspace-write capability.",
+      "find": "        self.0 & Self::WORKSPACE_WRITE != 0",
+      "replace": "        false"
+    },
+    {
+      "id": "network-capability-report-inverted",
+      "file": "crates/hephaestus-core/src/authority.rs",
+      "invariant": "Runtime adapters receive the exact compiled network capability.",
+      "find": "        self.0 & Self::NETWORK != 0",
+      "replace": "        false"
+    },
+    {
+      "id": "zero-wall-budget-accepted",
+      "file": "crates/hephaestus-runtime/src/spec.rs",
+      "invariant": "Every run has a non-zero hard wall deadline.",
+      "find": "        if wall.is_zero() {\n            return Err(RuntimeError::InvalidSpec(\"wall budget must be non-zero\"));\n        }",
+      "replace": "        if false && wall.is_zero() {\n            return Err(RuntimeError::InvalidSpec(\"wall budget must be non-zero\"));\n        }"
+    },
+    {
+      "id": "unsafe-run-id-accepted",
+      "file": "crates/hephaestus-runtime/src/spec.rs",
+      "invariant": "Run identifiers cannot escape the sandbox root.",
+      "find": "        if run_id.is_empty()\n            || !run_id\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))\n        {",
+      "replace": "        if false {"
+    },
+    {
+      "id": "sandbox-capability-proof-bypassed",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Worker authority requires the exact unexpired token bound to that run.",
+      "find": "        if token.run_id != self.run_id\n            || token.expires_at != self.expires_at\n            || Instant::now() >= self.expires_at\n            || !constant_time_equal(&token.secret, &self.secret)\n            || self.capabilities.derive_child(requested).is_err()\n        {",
+      "replace": "        if false {"
+    },
+    {
+      "id": "zero-capability-ttl-accepted",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Capability tokens always have a non-zero lifetime.",
+      "find": "        if token_ttl.is_zero() {\n            return Err(RuntimeError::InvalidSpec(\"token TTL must be non-zero\"));\n        }",
+      "replace": "        if false && token_ttl.is_zero() {\n            return Err(RuntimeError::InvalidSpec(\"token TTL must be non-zero\"));\n        }"
+    },
+    {
+      "id": "reference-runtime-network-authority-widened",
+      "file": "crates/hephaestus-runtime/src/deterministic.rs",
+      "invariant": "The offline reference runtime cannot receive network authority.",
+      "find": "        self.report_capabilities()\n            .authority\n            .derive_child(spec.capabilities())\n            .map_err(|_| RuntimeError::CapabilityDenied)?;",
+      "replace": "        self.report_capabilities()\n            .authority\n            .derive_child(spec.capabilities())\n            .ok();"
+    },
+    {
+      "id": "runtime-output-budget-bypassed",
+      "file": "crates/hephaestus-runtime/src/deterministic.rs",
+      "invariant": "Provider output exceeding the hard byte budget fails the run.",
+      "find": "            if output.len() > run.maximum_output_bytes {",
+      "replace": "            if false && output.len() > run.maximum_output_bytes {"
+    },
+    {
+      "id": "provider-sandbox-authority-mismatch-accepted",
+      "file": "crates/hephaestus-runtime/src/provider.rs",
+      "invariant": "A provider invocation cannot claim authority different from its sandbox.",
+      "find": "    if sandbox.capabilities() != spec.capabilities() {\n        return Err(RuntimeError::CapabilityDenied);\n    }",
+      "replace": "    if false && sandbox.capabilities() != spec.capabilities() {\n        return Err(RuntimeError::CapabilityDenied);\n    }"
+    },
+    {
+      "id": "empty-provider-executable-accepted",
+      "file": "crates/hephaestus-runtime/src/provider.rs",
+      "invariant": "Provider invocations always name an executable.",
+      "find": "    if path.as_os_str().is_empty() {\n        return Err(RuntimeError::InvalidSpec(\"provider executable is empty\"));\n    }",
+      "replace": "    if false && path.as_os_str().is_empty() {\n        return Err(RuntimeError::InvalidSpec(\"provider executable is empty\"));\n    }"
     }
   ]
 }

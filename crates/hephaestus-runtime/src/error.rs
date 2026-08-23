@@ -1,0 +1,39 @@
+use std::{error::Error, fmt, io};
+
+/// Sandbox, budget, provider, and supervised-process failures.
+#[derive(Debug)]
+pub enum RuntimeError {
+    /// The operating system rejected an isolation or process operation.
+    Io(io::Error),
+    /// A stable identifier or budget was invalid.
+    InvalidSpec(&'static str),
+    /// Git could not create or remove an isolated worktree.
+    Git(String),
+    /// A capability token was missing, expired, or did not match the run.
+    CapabilityDenied,
+    /// A requested provider or lifecycle action is unsupported.
+    Unsupported(&'static str),
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::InvalidSpec(_) | Self::Git(_) | Self::CapabilityDenied | Self::Unsupported(_) => {
+                None
+            }
+        }
+    }
+}
+
+impl From<io::Error> for RuntimeError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}

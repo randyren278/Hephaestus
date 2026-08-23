@@ -29,6 +29,11 @@ flowchart TD
     Socket --> Daemon[Single-writer daemon]
     Daemon --> Event
     Replay --> Daemon
+    Daemon --> Runtime[Provider-neutral runtime]
+    Runtime --> Sandbox[Private Git worktree]
+    Sandbox --> Codex[Codex driver]
+    Sandbox --> Claude[Claude driver]
+    Sandbox --> Reference[Offline reference runtime]
 ```
 
 ## Trust boundary
@@ -41,6 +46,7 @@ The authority, domain, compiler, Genome, World, event-store, and artifact-store 
 - `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.
+- `crates/hephaestus-runtime/` — capability-scoped worktrees and runtime adapters.
 - `checks/` — coverage, mutation, and documentation gates.
 - `.github/workflows/ci.yml` — deterministic and adversarial CI jobs.
 - `HEPHAESTUS_MASTER_PLAN.md` — product and engineering specification.

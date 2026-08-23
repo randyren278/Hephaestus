@@ -11,7 +11,7 @@ flowchart LR
     Evidence --> Promotion[Deterministic promotion]
 ```
 
-The repository now has an executable constitution, a durable evidence spine, fail-closed Genome and World compilers, and a runnable local control plane. `crates/hephaestus-core/` owns authority and domain Laws. `crates/hephaestus-ledger/` owns a WAL-backed, hash-linked SQLite event stream and a BLAKE3 content-addressed artifact store. `crates/hephaestus-genome/` normalizes versioned JSON or YAML and derives immutable identities. `crates/hephaestus-control/` provides the single-writer `hephaestusd` daemon and authenticated `hephaestus` operator CLI. CI deliberately breaks each invariant and requires the suite to detect the regression.
+The repository now has an executable constitution, durable evidence spine, fail-closed Genome and World compilers, runnable local control plane, and provider-neutral runtime substrate. `crates/hephaestus-core/` owns authority and domain Laws. `crates/hephaestus-ledger/` owns canonical events and artifacts. `crates/hephaestus-genome/` derives immutable identities. `crates/hephaestus-control/` provides the single-writer daemon and operator CLI. `crates/hephaestus-runtime/` creates private Git worktrees, expiring run-bound capabilities, hard budgets, deterministic offline execution, and inert Codex/Claude invocation contracts. CI deliberately breaks each invariant and requires the suite to detect the regression.
 
 ## Development
 
@@ -23,10 +23,10 @@ cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
-python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 40
+python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 50
 python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md
 ```
 
 The full product and engineering specification is in [HEPHAESTUS_MASTER_PLAN.md](HEPHAESTUS_MASTER_PLAN.md).
 
-The executable vocabulary is grounded by the [Constitution](docs/CONSTITUTION.md), [Threat Model](docs/THREAT_MODEL.md), [Terminology](docs/TERMINOLOGY.md), and [Evaluation Philosophy](docs/EVALUATION_PHILOSOPHY.md). Runtime operator behavior is specified in the [Control Plane](docs/CONTROL_PLANE.md); compiler contracts are specified in [Genomes](docs/GENOMES.md) and [Worlds](docs/WORLDS.md).
+The executable vocabulary is grounded by the [Constitution](docs/CONSTITUTION.md), [Threat Model](docs/THREAT_MODEL.md), [Terminology](docs/TERMINOLOGY.md), and [Evaluation Philosophy](docs/EVALUATION_PHILOSOPHY.md). Runtime behavior is specified in [Runtimes and Sandboxes](docs/RUNTIMES.md), operator behavior in the [Control Plane](docs/CONTROL_PLANE.md), and compiler contracts in [Genomes](docs/GENOMES.md) and [Worlds](docs/WORLDS.md).

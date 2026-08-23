@@ -4,6 +4,7 @@ members = [
     "crates/hephaestus-control",
     "crates/hephaestus-genome",
     "crates/hephaestus-ledger",
+    "crates/hephaestus-runtime",
 ]
 resolver = "2"
 
