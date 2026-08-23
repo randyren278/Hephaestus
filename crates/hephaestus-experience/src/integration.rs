@@ -21,6 +21,7 @@ pub struct RecordedRuntime<R> {
 
 struct RecordedRun {
     provenance: Provenance,
+    source_revision: String,
     state: RecordedRunState,
     pending_observations: VecDeque<RuntimeObservation>,
 }
@@ -238,6 +239,7 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             spec.run_id().to_owned(),
             RecordedRun {
                 provenance: provenance.clone(),
+                source_revision: spec.source_revision().to_owned(),
                 state: RecordedRunState::Active,
                 pending_observations: VecDeque::new(),
             },
@@ -267,6 +269,10 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
                 "network".to_owned(),
                 spec.capabilities().allows_network().to_string(),
             ),
+            (
+                "source_revision".to_owned(),
+                spec.source_revision().to_owned(),
+            ),
         ]);
         if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {
             return Err(self.contain_after_evidence_failure(spec.run_id(), error));
@@ -291,6 +297,7 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             .get(spec.run_id())
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
         if existing.provenance != provenance
+            || existing.source_revision != spec.source_revision()
             || existing.state != RecordedRunState::Terminal
             || !existing.pending_observations.is_empty()
         {
@@ -312,6 +319,7 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
             spec.run_id().to_owned(),
             RecordedRun {
                 provenance: provenance.clone(),
+                source_revision: spec.source_revision().to_owned(),
                 state: RecordedRunState::Active,
                 pending_observations: VecDeque::new(),
             },
@@ -319,10 +327,16 @@ impl<R: RuntimeAdapter> RuntimeAdapter for RecordedRuntime<R> {
         if let Err(error) = self.record(
             provenance,
             TraceKind::LifecycleResumed,
-            BTreeMap::from([(
-                "checkpoint_used_hash".to_owned(),
-                blake3::hash(checkpoint.as_bytes()).to_hex().to_string(),
-            )]),
+            BTreeMap::from([
+                (
+                    "checkpoint_used_hash".to_owned(),
+                    blake3::hash(checkpoint.as_bytes()).to_hex().to_string(),
+                ),
+                (
+                    "source_revision".to_owned(),
+                    spec.source_revision().to_owned(),
+                ),
+            ]),
             1,
         ) {
             return Err(self.contain_after_evidence_failure(spec.run_id(), error));

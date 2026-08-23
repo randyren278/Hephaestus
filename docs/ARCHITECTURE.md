@@ -33,7 +33,7 @@ flowchart TD
     Runtime --> Recorded[Evidence-required runtime wrapper]
     Recorded --> Experience[Redacted provenance-bound traces]
     Experience --> Event
-    Runtime --> Sandbox[Private Git worktree]
+    Runtime --> Sandbox[Pinned private Git worktree]
     Sandbox --> Codex[Codex driver]
     Sandbox --> Claude[Claude driver]
     Sandbox --> Reference[Offline reference runtime]

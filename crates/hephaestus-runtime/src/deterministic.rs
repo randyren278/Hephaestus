@@ -31,6 +31,7 @@ struct ReferenceRun {
     checkpoint: Option<String>,
     genome_id: String,
     world_id: String,
+    source_revision: String,
     prompt_hash: String,
     started: Instant,
     elapsed: Duration,
@@ -186,7 +187,7 @@ fn reference_run(
     token: &CapabilityToken,
     checkpoint: Option<&str>,
 ) -> Result<ReferenceRun, RuntimeError> {
-    sandbox.authorize(token, spec.capabilities())?;
+    sandbox.authorize_spec(token, spec)?;
     runtime
         .report_capabilities()
         .authority
@@ -202,6 +203,7 @@ fn reference_run(
         checkpoint: checkpoint.map(str::to_owned),
         genome_id: spec.genome_id().to_owned(),
         world_id: spec.world_id().to_owned(),
+        source_revision: spec.source_revision().to_owned(),
         prompt_hash: blake3::hash(spec.prompt().as_bytes()).to_hex().to_string(),
         started: Instant::now(),
         elapsed: Duration::ZERO,
@@ -223,6 +225,7 @@ struct Inventory<'a> {
     schema_version: u16,
     genome_id: &'a str,
     world_id: &'a str,
+    source_revision: &'a str,
     prompt_hash: &'a str,
     checkpoint: Option<&'a str>,
     files: Vec<FileRecord>,
@@ -270,6 +273,7 @@ fn inventory(run: &ReferenceRun) -> Result<(Vec<u8>, Vec<FileRecord>), RuntimeEr
         schema_version: 1,
         genome_id: &run.genome_id,
         world_id: &run.world_id,
+        source_revision: &run.source_revision,
         prompt_hash: &run.prompt_hash,
         checkpoint: run.checkpoint.as_deref(),
         files: files.clone(),

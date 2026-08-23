@@ -72,13 +72,13 @@ jobs:
             minimum: 13
           - scope: hephaestus-control
             prefix: crates/hephaestus-control/
-            minimum: 17
+            minimum: 18
           - scope: hephaestus-runtime
             prefix: crates/hephaestus-runtime/
-            minimum: 24
+            minimum: 27
           - scope: hephaestus-experience
             prefix: crates/hephaestus-experience/
-            minimum: 34
+            minimum: 35
           - scope: python-statistics
             prefix: python/
             minimum: 5

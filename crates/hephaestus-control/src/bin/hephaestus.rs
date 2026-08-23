@@ -149,6 +149,7 @@ fn print_human(response: &ApiResponse) {
                 run_id,
                 genome_id,
                 world_id,
+                source_revision,
                 completion_reason,
                 latency_millis,
                 actual_cost_microusd,
@@ -158,7 +159,7 @@ fn print_human(response: &ApiResponse) {
             }),
             None,
         ) => println!(
-            "run={run_id} genome={genome_id} world={world_id} reason={completion_reason:?} latency_ms={latency_millis} cost_microusd={actual_cost_microusd} stdout={stdout_artifact_id} stderr={stderr_artifact_id} traces={}",
+            "run={run_id} genome={genome_id} world={world_id} revision={source_revision} reason={completion_reason:?} latency_ms={latency_millis} cost_microusd={actual_cost_microusd} stdout={stdout_artifact_id} stderr={stderr_artifact_id} traces={}",
             trace_artifact_ids.join(",")
         ),
         (

@@ -123,6 +123,8 @@ pub enum ResponseData {
         genome_id: String,
         /// Immutable registered World identity governing the run.
         world_id: String,
+        /// Exact Git commit inventoried by the isolated runtime.
+        source_revision: String,
         /// Exact runtime-owned completion reason.
         completion_reason: RunCompletionReason,
         /// Runtime-owned terminal latency.

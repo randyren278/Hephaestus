@@ -681,8 +681,8 @@
       "id": "recorded-runtime-resume-provenance-spliced",
       "file": "crates/hephaestus-experience/src/integration.rs",
       "invariant": "Resume cannot splice a different Genome or World provenance into an existing run identity.",
-      "find": "        if existing.provenance != provenance\n            || existing.state != RecordedRunState::Terminal",
-      "replace": "        if false && existing.provenance != provenance\n            || existing.state != RecordedRunState::Terminal"
+      "find": "        if existing.provenance != provenance\n            || existing.source_revision != spec.source_revision()\n            || existing.state != RecordedRunState::Terminal",
+      "replace": "        if false && existing.provenance != provenance\n            || existing.source_revision != spec.source_revision()\n            || existing.state != RecordedRunState::Terminal"
     },
     {
       "id": "recorded-runtime-interrupt-completion-omitted",
@@ -809,6 +809,41 @@
       "invariant": "Promotion requires the confidence interval to clear the minimum effect.",
       "find": "        and interval.lower_bps > policy.minimum_delta_bps",
       "replace": "        and interval.lower_bps < policy.minimum_delta_bps"
+    },
+    {
+      "id": "run-spec-revision-not-resolved",
+      "file": "crates/hephaestus-runtime/src/spec.rs",
+      "invariant": "A run specification resolves its requested Git revision to one immutable commit.",
+      "find": "        let source_revision = resolve_commit(&source_repository, source_revision.as_ref())?;",
+      "replace": "        let source_revision = \"0000000000000000000000000000000000000000\".to_owned();"
+    },
+    {
+      "id": "sandbox-checks-out-moving-head",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "A sandbox materializes the revision pinned by its RunSpec rather than a moving branch.",
+      "find": "            .arg(spec.source_revision())\n            .output()?;",
+      "replace": "            .arg(\"HEAD\")\n            .output()?;"
+    },
+    {
+      "id": "sandbox-revision-binding-bypassed",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "An adapter cannot reuse a sandbox for a RunSpec pinned to another revision.",
+      "find": "            || self.source_revision != spec.source_revision()",
+      "replace": ""
+    },
+    {
+      "id": "runtime-start-revision-evidence-forgotten",
+      "file": "crates/hephaestus-experience/src/integration.rs",
+      "invariant": "Lifecycle start evidence records the exact source revision assigned to the run.",
+      "find": "            (\n                \"source_revision\".to_owned(),\n                spec.source_revision().to_owned(),\n            ),\n        ]);\n        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {",
+      "replace": "            (\n                \"source_revision\".to_owned(),\n                \"unbound\".to_owned(),\n            ),\n        ]);\n        if let Err(error) = self.record(provenance, TraceKind::LifecycleStarted, fields, 1) {"
+    },
+    {
+      "id": "run-result-revision-forgotten",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The canonical run result receipt binds the exact inventoried source revision.",
+      "find": "        source_revision: source_revision.to_owned(),",
+      "replace": "        source_revision: \"0000000000000000000000000000000000000000\".to_owned(),"
     }
   ]
 }

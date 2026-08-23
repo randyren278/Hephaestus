@@ -372,8 +372,9 @@ impl ControlPlane {
         let (execution, recorder) =
             execute_reference_runtime(recorder, &spec, &sandbox, &token, run_id);
         let (ledger, artifacts) = recorder.into_stores();
-        let execution = execution
-            .and_then(|output| persist_reference_output(&artifacts, run_id, genome, output));
+        let execution = execution.and_then(|output| {
+            persist_reference_output(&artifacts, run_id, genome, spec.source_revision(), output)
+        });
         self.storage = Some(CanonicalStorage { ledger, artifacts });
         let cleanup = sandbox.cleanup().map_err(|_| ExecuteError::Internal);
         cleanup?;
@@ -387,6 +388,7 @@ impl ControlPlane {
             run_id,
             genome_id,
             world_id,
+            source_revision,
             completion_reason,
             latency_millis,
             actual_cost_microusd,
@@ -401,6 +403,7 @@ impl ControlPlane {
             run_id,
             genome_id,
             world_id,
+            source_revision,
             completion_reason: *completion_reason,
             latency_millis: *latency_millis,
             actual_cost_microusd: *actual_cost_microusd,
@@ -460,6 +463,7 @@ struct RunResultReceipt<'a> {
     run_id: &'a str,
     genome_id: &'a str,
     world_id: &'a str,
+    source_revision: &'a str,
     completion_reason: RunCompletionReason,
     latency_millis: u64,
     actual_cost_microusd: u64,
@@ -474,6 +478,7 @@ struct OwnedRunResultReceipt {
     run_id: String,
     genome_id: String,
     world_id: String,
+    source_revision: String,
     completion_reason: RunCompletionReason,
     latency_millis: u64,
     actual_cost_microusd: u64,
@@ -550,6 +555,7 @@ fn persist_reference_output(
     artifacts: &ArtifactStore,
     run_id: &str,
     genome: &GenomeRecord,
+    source_revision: &str,
     output: ReferenceExecution,
 ) -> Result<ResponseData, ExecuteError> {
     let stdout_artifact_id = artifacts
@@ -566,6 +572,7 @@ fn persist_reference_output(
         run_id: run_id.to_owned(),
         genome_id: genome.genome_id.clone(),
         world_id: genome.world_id.clone(),
+        source_revision: source_revision.to_owned(),
         completion_reason: output.completion_reason,
         latency_millis: output.latency_millis,
         actual_cost_microusd: 0,
@@ -817,6 +824,7 @@ fn validate_run_result(event: &StoredEvent) -> Result<(), ControlError> {
     require_projection_text(&receipt.run_id, "run_id")?;
     validate_content_id(&receipt.genome_id, "genome")?;
     validate_content_id(&receipt.world_id, "world")?;
+    validate_source_revision(&receipt.source_revision)?;
     ArtifactId::parse(receipt.stdout_artifact_id)?;
     ArtifactId::parse(receipt.stderr_artifact_id)?;
     for artifact in receipt.trace_artifact_ids {
@@ -834,6 +842,16 @@ fn validate_run_result(event: &StoredEvent) -> Result<(), ControlError> {
     {
         return Err(ControlError::Projection(
             "run result crossed its provenance boundary".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_revision(revision: &str) -> Result<(), ControlError> {
+    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ControlError::Projection(
+            "run result source revision is not an object ID".to_owned(),
         ));
     }
     Ok(())
@@ -1362,6 +1380,7 @@ mod tests {
             "run_id": "run",
             "genome_id": format!("hephaestus:genome:{}", "8".repeat(64)),
             "world_id": format!("hephaestus:world:{}", "7".repeat(64)),
+            "source_revision": "6".repeat(40),
             "completion_reason": "success",
             "latency_millis": 1,
             "actual_cost_microusd": 0,

@@ -25,6 +25,7 @@ pub struct Sandbox {
     worktree: PathBuf,
     execution_dir: PathBuf,
     source_repository: PathBuf,
+    source_revision: String,
     capabilities: CapabilitySet,
     secret: [u8; 32],
     expires_at: Instant,
@@ -51,6 +52,33 @@ impl Sandbox {
     #[must_use]
     pub const fn capabilities(&self) -> CapabilitySet {
         self.capabilities
+    }
+
+    /// Exact Git commit materialized in this sandbox.
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+
+    pub(crate) fn authorize_spec(
+        &self,
+        token: &CapabilityToken,
+        spec: &RunSpec,
+    ) -> Result<(), RuntimeError> {
+        self.authorize(token, spec.capabilities())?;
+        self.validate_spec_binding(spec)
+    }
+
+    pub(crate) fn validate_spec_binding(&self, spec: &RunSpec) -> Result<(), RuntimeError> {
+        if self.run_id != spec.run_id()
+            || self.source_repository != spec.source_repository()
+            || self.source_revision != spec.source_revision()
+        {
+            return Err(RuntimeError::InvalidSpec(
+                "run specification does not match the materialized sandbox",
+            ));
+        }
+        Ok(())
     }
 
     /// Verifies token binding, expiry, and requested authority.
@@ -147,7 +175,7 @@ impl SandboxManager {
             .arg(spec.source_repository())
             .args(["worktree", "add", "--detach"])
             .arg(&worktree)
-            .arg("HEAD")
+            .arg(spec.source_revision())
             .output()?;
         if !output.status.success() {
             let _ignored = fs::remove_dir_all(&run_root);
@@ -167,6 +195,7 @@ impl SandboxManager {
             worktree,
             execution_dir,
             source_repository: spec.source_repository().to_owned(),
+            source_revision: spec.source_revision().to_owned(),
             capabilities: spec.capabilities(),
             secret,
             expires_at,

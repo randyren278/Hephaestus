@@ -146,5 +146,5 @@ fn validate_sandbox_authority(spec: &RunSpec, sandbox: &Sandbox) -> Result<(), R
     if sandbox.capabilities() != spec.capabilities() {
         return Err(RuntimeError::CapabilityDenied);
     }
-    Ok(())
+    sandbox.validate_spec_binding(spec)
 }

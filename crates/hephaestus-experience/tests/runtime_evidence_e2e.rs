@@ -50,6 +50,7 @@ fn real_offline_run_emits_provider_observations_and_truthful_terminal_evidence()
         ]
     );
     assert_artifacts_are_safe(&runtime, &initial_receipts, fixture.spec.prompt());
+    assert!(artifact(&runtime, &initial_receipts[0]).contains(fixture.spec.source_revision()));
     let completion = artifact(&runtime, &initial_receipts[4]);
     assert!(completion.contains("\"completion_reason\":\"success\""));
     assert!(completion.contains("\"actual_cost_microusd\":\"0\""));
@@ -81,6 +82,7 @@ fn real_offline_run_emits_provider_observations_and_truthful_terminal_evidence()
     assert_eq!(resumed[5].kind, TraceKind::LifecycleResumed);
     assert!(!artifact(&runtime, &resumed[5]).contains("checkpoint-secret"));
     assert!(artifact(&runtime, &resumed[5]).contains("checkpoint_used_hash"));
+    assert!(artifact(&runtime, &resumed[5]).contains(fixture.spec.source_revision()));
     fixture.cleanup();
 }
 
@@ -348,11 +350,41 @@ fn runtime_operation_failures_remain_evidence_backed() {
     runtime
         .snapshot(fixture.spec.run_id())
         .expect("finish scripted runtime before resume failure");
-    let mismatched_spec = RunSpec::new(
+    fs::write(
+        fixture.repository.path().join("fixture.txt"),
+        b"a different immutable revision\n",
+    )
+    .expect("change repository revision");
+    run_git(fixture.repository.path(), &["add", "fixture.txt"]);
+    run_git(
+        fixture.repository.path(),
+        &["commit", "--quiet", "-m", "different revision"],
+    );
+    let mismatched_revision_spec = RunSpec::new(
+        fixture.spec.run_id(),
+        fixture.spec.genome_id(),
+        fixture.spec.world_id(),
+        fixture.spec.source_repository(),
+        fixture.spec.prompt(),
+        fixture.spec.capabilities(),
+        fixture.spec.budget(),
+    )
+    .expect("mismatched revision spec");
+    assert!(matches!(
+        runtime.resume(
+            &mismatched_revision_spec,
+            &fixture.sandbox,
+            &fixture.token,
+            "mismatched-revision-checkpoint",
+        ),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    let mismatched_spec = RunSpec::new_at_revision(
         fixture.spec.run_id(),
         "different-genome",
         "world-1",
         fixture.spec.source_repository(),
+        fixture.spec.source_revision(),
         fixture.spec.prompt(),
         fixture.spec.capabilities(),
         fixture.spec.budget(),
@@ -570,7 +602,7 @@ fn recorder(directory: &TempDir, maximum_records: usize, maximum_bytes: usize) -
 }
 
 struct Fixture {
-    _repository: TempDir,
+    repository: TempDir,
     _sandboxes: TempDir,
     spec: RunSpec,
     sandbox: Sandbox,
@@ -599,7 +631,7 @@ impl Fixture {
         .expect("run spec");
         let (sandbox, token) = manager.create(&spec).expect("create sandbox");
         Self {
-            _repository: repository,
+            repository,
             _sandboxes: sandboxes,
             spec,
             sandbox,

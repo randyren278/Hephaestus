@@ -90,7 +90,7 @@ impl SupervisedRuntime {
         sandbox: &Sandbox,
         token: &CapabilityToken,
     ) -> Result<RunHandle, RuntimeError> {
-        sandbox.authorize(token, spec.capabilities())?;
+        sandbox.authorize_spec(token, spec)?;
         self.report_capabilities()
             .authority
             .derive_child(spec.capabilities())

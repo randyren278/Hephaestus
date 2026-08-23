@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, process::Command, time::Duration};
 
 use hephaestus_core::authority::CapabilitySet;
 
@@ -62,6 +62,7 @@ pub struct RunSpec {
     genome_id: String,
     world_id: String,
     source_repository: PathBuf,
+    source_revision: String,
     prompt: String,
     capabilities: CapabilitySet,
     budget: Budget,
@@ -79,6 +80,38 @@ impl RunSpec {
         genome_id: impl Into<String>,
         world_id: impl Into<String>,
         source_repository: impl Into<PathBuf>,
+        prompt: impl Into<String>,
+        capabilities: CapabilitySet,
+        budget: Budget,
+    ) -> Result<Self, RuntimeError> {
+        Self::new_at_revision(
+            run_id,
+            genome_id,
+            world_id,
+            source_repository,
+            "HEAD",
+            prompt,
+            capabilities,
+            budget,
+        )
+    }
+
+    /// Creates a run request pinned to the commit resolved from `source_revision`.
+    ///
+    /// The revision is resolved during construction, so later branch or `HEAD`
+    /// movement cannot change the source paired with this request.
+    ///
+    /// # Errors
+    ///
+    /// In addition to [`Self::new`] validation, rejects revisions that Git cannot
+    /// resolve to an immutable commit in the source repository.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_at_revision(
+        run_id: impl Into<String>,
+        genome_id: impl Into<String>,
+        world_id: impl Into<String>,
+        source_repository: impl Into<PathBuf>,
+        source_revision: impl AsRef<str>,
         prompt: impl Into<String>,
         capabilities: CapabilitySet,
         budget: Budget,
@@ -105,11 +138,13 @@ impl RunSpec {
                 "source repository is not a directory",
             ));
         }
+        let source_revision = resolve_commit(&source_repository, source_revision.as_ref())?;
         Ok(Self {
             run_id,
             genome_id,
             world_id,
             source_repository,
+            source_revision,
             prompt,
             capabilities,
             budget,
@@ -140,6 +175,12 @@ impl RunSpec {
         &self.source_repository
     }
 
+    /// Exact Git commit paired with this run.
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+
     /// Provider-neutral task prompt.
     #[must_use]
     pub fn prompt(&self) -> &str {
@@ -157,4 +198,31 @@ impl RunSpec {
     pub const fn budget(&self) -> Budget {
         self.budget
     }
+}
+
+fn resolve_commit(repository: &std::path::Path, revision: &str) -> Result<String, RuntimeError> {
+    if revision.trim().is_empty() {
+        return Err(RuntimeError::InvalidSpec("source revision is required"));
+    }
+    let commit_expression = format!("{revision}^{{commit}}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(commit_expression)
+        .output()?;
+    if !output.status.success() {
+        return Err(RuntimeError::Git(
+            "source revision is not a commit".to_owned(),
+        ));
+    }
+    let commit = std::str::from_utf8(&output.stdout)
+        .map_err(|_| RuntimeError::Git("resolved source revision is not UTF-8".to_owned()))?
+        .trim();
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RuntimeError::Git(
+            "resolved source revision is not an object ID".to_owned(),
+        ));
+    }
+    Ok(commit.to_ascii_lowercase())
 }

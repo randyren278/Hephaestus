@@ -105,6 +105,89 @@ fn isolated_worktrees_bind_expiring_tokens_to_one_run() {
 }
 
 #[test]
+fn run_specs_pin_the_resolved_revision_before_head_moves() {
+    let repository = repository_fixture();
+    let original_revision = git_stdout(repository.path(), &["rev-parse", "HEAD"]);
+    let run_spec = spec("pinned-revision", repository.path(), 1_000_000, false);
+    assert_eq!(run_spec.source_revision(), original_revision);
+
+    fs::write(
+        repository.path().join("fixture.txt"),
+        b"changed after specification\n",
+    )
+    .expect("change fixture");
+    run_git(repository.path(), &["add", "fixture.txt"]);
+    run_git(
+        repository.path(),
+        &[
+            "-c",
+            "user.name=Hephaestus Tests",
+            "-c",
+            "user.email=hephaestus@example.invalid",
+            "commit",
+            "-qm",
+            "move head",
+        ],
+    );
+    assert_ne!(
+        git_stdout(repository.path(), &["rev-parse", "HEAD"]),
+        original_revision
+    );
+    let moved_spec = spec("pinned-revision", repository.path(), 1_000_000, false);
+    let historical_spec = RunSpec::new_at_revision(
+        "historical-revision",
+        "hephaestus:genome:test",
+        "hephaestus:world:test",
+        repository.path(),
+        "HEAD~1",
+        "inventory the isolated worktree",
+        CapabilitySet::new(false, false),
+        Budget::new(Duration::from_secs(5), 1_000_000, 0).expect("budget"),
+    )
+    .expect("resolve historical tree-ish");
+    assert_eq!(historical_spec.source_revision(), original_revision);
+
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let (sandbox, token) = manager.create(&run_spec).expect("create pinned sandbox");
+    assert_eq!(
+        fs::read(sandbox.worktree().join("fixture.txt")).expect("read pinned fixture"),
+        b"deterministic fixture\n"
+    );
+    assert_eq!(
+        git_stdout(sandbox.worktree(), &["rev-parse", "HEAD"]),
+        original_revision
+    );
+    assert_eq!(sandbox.source_revision(), original_revision);
+    assert!(matches!(
+        DeterministicRuntime::default().start(&moved_spec, &sandbox, &token),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    assert!(matches!(
+        ProviderInvocation::codex("codex", &moved_spec, &sandbox),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn run_specs_reject_unresolvable_revisions_at_construction() {
+    let repository = repository_fixture();
+    let result = RunSpec::new_at_revision(
+        "invalid-revision",
+        "hephaestus:genome:test",
+        "hephaestus:world:test",
+        repository.path(),
+        "refs/heads/does-not-exist",
+        "inventory the isolated worktree",
+        CapabilitySet::new(false, false),
+        Budget::new(Duration::from_secs(5), 1_000_000, 0).expect("budget"),
+    );
+    assert!(matches!(result, Err(RuntimeError::Git(_))));
+}
+
+#[test]
 fn deterministic_runtime_starts_resumes_interrupts_and_snapshots_real_worktrees() {
     let repository = repository_fixture();
     let sandboxes = tempdir().expect("sandbox directory");
@@ -646,12 +729,8 @@ fn provider_and_sandbox_setup_reject_invalid_inputs() {
         "prompt",
         CapabilitySet::new(false, false),
         budget,
-    )
-    .expect("non-Git spec is structurally valid");
-    assert!(matches!(
-        manager.create(&invalid_spec),
-        Err(RuntimeError::Git(_))
-    ));
+    );
+    assert!(matches!(invalid_spec, Err(RuntimeError::Git(_))));
 
     let removed_repository = repository_fixture();
     let removed_spec = spec("cleanup-failure", removed_repository.path(), 1000, false);
@@ -685,6 +764,24 @@ fn repository_fixture() -> tempfile::TempDir {
         ],
     );
     repository
+}
+
+fn git_stdout(repository: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("execute git");
+    assert!(
+        output.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 git output")
+        .trim()
+        .to_owned()
 }
 
 fn spec(

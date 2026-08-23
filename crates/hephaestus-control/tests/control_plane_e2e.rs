@@ -94,6 +94,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
     .expect("write source fixture");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-m", "fixture"]);
+    let source_revision = git_stdout(&repository, &["rev-parse", "HEAD"]);
     let (world, genome) = seed_compiled_genome(&data_dir);
 
     let daemon = Daemon::start_with_repository(&data_dir, &repository);
@@ -115,6 +116,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
                 run_id,
                 genome_id,
                 world_id,
+                source_revision: actual_source_revision,
                 completion_reason: RunCompletionReason::Success,
                 latency_millis,
                 actual_cost_microusd: 0,
@@ -124,6 +126,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
             } => {
                 assert_eq!(genome_id, genome.genome_id);
                 assert_eq!(world_id, world.world_id);
+                assert_eq!(actual_source_revision, source_revision);
                 (
                     run_id,
                     stdout_artifact_id,
@@ -146,6 +149,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
     assert_eq!(inventory["schema_version"], 1);
     assert_eq!(inventory["genome_id"], genome.genome_id);
     assert_eq!(inventory["world_id"], world.world_id);
+    assert_eq!(inventory["source_revision"], source_revision);
     assert!(inventory["checkpoint"].is_null());
     let paths: Vec<_> = inventory["files"]
         .as_array()
@@ -181,6 +185,7 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
     assert_eq!(started["kind"], "lifecycle_started");
     assert_eq!(started["fields"]["workspace_write"], "false");
     assert_eq!(started["fields"]["network"], "false");
+    assert_eq!(started["fields"]["source_revision"], source_revision);
     assert!(matches!(
         response(&cli(&data_dir, &["status"])).data,
         Some(ResponseData::Status { active_runs: 0, .. })
@@ -212,6 +217,10 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
         run_events.last().expect("result receipt").event_type,
         "run.result_recorded"
     );
+    let result_receipt: serde_json::Value =
+        serde_json::from_slice(&run_events.last().expect("result receipt").payload)
+            .expect("decode result receipt");
+    assert_eq!(result_receipt["source_revision"], source_revision);
     let terminal_artifact = artifacts
         .get(
             &hephaestus_ledger::ArtifactId::parse(
@@ -562,6 +571,35 @@ fn reference_run_rejects_a_genome_without_a_registered_world() {
     daemon.stop();
 }
 
+#[test]
+fn reference_run_without_a_resolvable_head_creates_no_runtime_evidence() {
+    let directory = tempdir().expect("temporary directory");
+    let data_dir = directory.path().join("data");
+    let repository = directory.path().join("empty-source");
+    fs::create_dir_all(&repository).expect("create source repository");
+    git(&repository, &["init"]);
+    let (_, genome) = seed_compiled_genome(&data_dir);
+
+    let daemon = Daemon::start_with_repository(&data_dir, &repository);
+    assert!(cli(&data_dir, &["unfreeze"]).status.success());
+    let output = cli(&data_dir, &["run", &genome.genome_id]);
+    assert!(!output.status.success());
+    daemon.stop();
+
+    let ledger = EventStore::open(data_dir.join("events.sqlite3")).expect("reopen ledger");
+    let history = ledger.replay_verified().expect("verify history");
+    assert!(history.iter().all(|event| {
+        event.event_type != "trace.recorded" && event.event_type != "run.result_recorded"
+    }));
+    assert!(
+        !data_dir.join("sandboxes").exists()
+            || fs::read_dir(data_dir.join("sandboxes"))
+                .expect("read sandbox root")
+                .next()
+                .is_none()
+    );
+}
+
 fn seed_canonical_state(data_dir: &Path) -> GenomeRecord {
     let artifact_store = ArtifactStore::open(data_dir.join("blobs")).expect("open artifact store");
     let canonical = br#"{"name":"seed"}"#;
@@ -692,6 +730,24 @@ fn git(repository: &Path, arguments: &[&str]) {
         "git fixture failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_stdout(repository: &Path, arguments: &[&str]) -> String {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 git output")
+        .trim()
+        .to_owned()
 }
 
 fn cli(data_dir: &Path, arguments: &[&str]) -> Output {
