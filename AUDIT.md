@@ -33,7 +33,7 @@ Baseline commit: `a48c4a5`
 - Strict Genome and World compilers normalize JSON/YAML, resolve ancestry and artifacts, constrain authority, and enforce exact World comparability.
 - The runnable daemon and CLI enforce a single writer, owner-only authenticated IPC, persistent operator freeze/kill state, Genome inspection, and verified replay.
 - The offline reference runtime exercises isolated worktrees, lifecycle operations, expiring capability tokens, and hard output/authority failure paths. A provider-neutral local process supervisor independently enforces allowlisted environments, stdin prompts, process-group interrupt, and hard wall/output limits. macOS hosted commands are wrapped in a live-tested deny-by-default Seatbelt policy; unsupported hosts fail closed. Hosted provider invocations are built but not executed without a billable permit.
-- Fifteen trust-critical modules are held to 95% coverage and 61 deliberate invariant mutations.
+- Fifteen trust-critical modules are held to 95% coverage and 62 deliberate invariant mutations.
 
 ## Remaining product loop
 

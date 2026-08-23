@@ -354,13 +354,17 @@ fn spawn_output_reader(
 }
 
 fn terminate(child: &mut Child, reason: StopReason) -> (Option<ExitStatus>, Option<StopReason>) {
-    let process_group = format!("-{}", child.id());
-    let _ignored = Command::new("/bin/kill")
-        .args(["-KILL", &process_group])
-        .status();
+    let _ignored = process_group_kill(child.id()).status();
     let _ignored = child.kill();
     let status = child.wait().ok();
     (status, Some(reason))
+}
+
+fn process_group_kill(pid: u32) -> Command {
+    let process_group = format!("-{pid}");
+    let mut command = Command::new("/bin/kill");
+    command.args(["-KILL", "--", &process_group]);
+    command
 }
 
 fn status_from_exit(status: ExitStatus) -> RunStatus {
@@ -422,6 +426,13 @@ mod tests {
         .join()
         .expect("join failing writer");
         assert!(write_failure.io_failed.load(Ordering::Acquire));
+
+        let command = process_group_kill(123);
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(arguments, ["-KILL", "--", "-123"]);
     }
 
     fn shared_run() -> Arc<SharedRun> {

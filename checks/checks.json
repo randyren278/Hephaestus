@@ -446,6 +446,13 @@
       "invariant": "An unrepresentable wall deadline is rejected before any child process starts.",
       "find": "        let deadline = Instant::now()\n            .checked_add(spec.budget().wall())\n            .ok_or(RuntimeError::InvalidSpec(\"wall budget exceeds clock range\"))?;",
       "replace": "        let deadline = Instant::now() + spec.budget().wall();"
+    },
+    {
+      "id": "supervisor-group-signal-misparsed",
+      "file": "crates/hephaestus-runtime/src/supervisor.rs",
+      "invariant": "Negative process-group identifiers are separated from kill options on every supported Unix host.",
+      "find": "    command.args([\"-KILL\", \"--\", &process_group]);",
+      "replace": "    command.args([\"-KILL\", &process_group]);"
     }
   ]
 }

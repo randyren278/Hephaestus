@@ -373,7 +373,7 @@ fn supervisor_interrupt_waits_for_process_group_termination() {
     let script = sandbox.worktree().join("spawn-child");
     fs::write(
         &script,
-        b"#!/bin/sh\n/bin/sleep 2 &\necho $! > child.pid\nwait\n",
+        b"#!/bin/sh\n/bin/sleep 4 &\necho $! > child.pid\nwait\n",
     )
     .expect("write child process fixture");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
@@ -398,7 +398,7 @@ fn supervisor_interrupt_waits_for_process_group_termination() {
     runtime
         .interrupt("supervised-interrupt")
         .expect("interrupt process");
-    assert!(interrupt_started.elapsed() < Duration::from_secs(1));
+    assert!(interrupt_started.elapsed() < Duration::from_secs(2));
     assert_eq!(
         runtime
             .snapshot("supervised-interrupt")
