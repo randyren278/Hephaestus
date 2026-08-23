@@ -17,6 +17,7 @@ use hephaestus_core::authority::{CapabilitySet, FreezeState, OperatorToken};
 use hephaestus_experience::{
     EvidenceRecorder, RecordedRuntime, RedactionPolicy, RetentionLimits, TraceKind, TraceReceipt,
 };
+use hephaestus_genome::{SourceFormat, compile_world};
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
 use hephaestus_runtime::{
     Budget, CapabilityToken, CompletionReason, DeterministicRuntime, RunSpec, RunStatus,
@@ -713,7 +714,18 @@ impl ControlState {
         }
         for world in self.worlds.values() {
             let id = ArtifactId::parse(world.artifact_id.clone())?;
-            artifacts.get(&id)?;
+            let bytes = artifacts.get(&id)?;
+            let source = std::str::from_utf8(&bytes).map_err(|_| {
+                ControlError::Projection("canonical World artifact is not UTF-8".to_owned())
+            })?;
+            let compiled = compile_world(source, SourceFormat::Json, artifacts).map_err(|_| {
+                ControlError::Projection("canonical World artifact failed compilation".to_owned())
+            })?;
+            if compiled.id() != world.world_id || compiled.name() != world.name {
+                return Err(ControlError::Projection(
+                    "registered World metadata does not match compiled artifact".to_owned(),
+                ));
+            }
         }
         for event in history {
             if event.event_type == "trace.recorded" {

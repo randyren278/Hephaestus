@@ -510,6 +510,36 @@ fn daemon_rejects_forged_operator_history_and_unverifiable_genomes() {
         ControlPlane::open(missing_world_directory.path()),
         Err(ControlError::Ledger(_))
     ));
+
+    let forged_world_directory = tempdir().expect("temporary directory");
+    let forged_artifacts = ArtifactStore::open(forged_world_directory.path().join("blobs"))
+        .expect("open forged World artifacts");
+    let forged_artifact = forged_artifacts
+        .put(br#"{"name":"not-a-World"}"#)
+        .expect("store forged World");
+    let forged_world = WorldRecord {
+        world_id: format!("hephaestus:world:{}", forged_artifact.as_str()),
+        name: "not-a-World".to_owned(),
+        artifact_id: forged_artifact.as_str().to_owned(),
+    };
+    let mut forged_world_ledger =
+        EventStore::open(forged_world_directory.path().join("events.sqlite3"))
+            .expect("open forged World ledger");
+    forged_world_ledger
+        .append(EventInput::new(
+            "forged-world",
+            &forged_world.world_id,
+            "world.registered",
+            "test-fixture",
+            1,
+            serde_json::to_vec(&forged_world).expect("encode forged World"),
+        ))
+        .expect("append forged World");
+    drop(forged_world_ledger);
+    assert!(matches!(
+        ControlPlane::open(forged_world_directory.path()),
+        Err(ControlError::Projection(_))
+    ));
 }
 
 #[test]
