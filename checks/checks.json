@@ -7,6 +7,9 @@
     "crates/hephaestus-core/src/domain.rs",
     "crates/hephaestus-control/src/client.rs",
     "crates/hephaestus-control/src/server.rs",
+    "crates/hephaestus-experience/src/record.rs",
+    "crates/hephaestus-experience/src/recorder.rs",
+    "crates/hephaestus-experience/src/redaction.rs",
     "crates/hephaestus-genome/src/compiler.rs",
     "crates/hephaestus-genome/src/genome.rs",
     "crates/hephaestus-genome/src/world.rs",
@@ -453,6 +456,90 @@
       "invariant": "Negative process-group identifiers are separated from kill options on every supported Unix host.",
       "find": "    command.args([\"-KILL\", \"--\", &process_group]);",
       "replace": "    command.args([\"-KILL\", &process_group]);"
+    },
+    {
+      "id": "empty-experience-provenance-accepted",
+      "file": "crates/hephaestus-experience/src/record.rs",
+      "invariant": "Every trace and experience carries non-empty bounded run, Genome, and World provenance.",
+      "find": "            if field.trim().is_empty() || field.len() > MAX_IDENTIFIER_BYTES {",
+      "replace": "            if false && (field.trim().is_empty() || field.len() > MAX_IDENTIFIER_BYTES) {"
+    },
+    {
+      "id": "single-source-contradiction-accepted",
+      "file": "crates/hephaestus-experience/src/record.rs",
+      "invariant": "A contradiction explicitly links at least two canonical source records.",
+      "find": "        if kind == ExperienceKind::Contradiction && source_event_ids.len() < 2 {",
+      "replace": "        if false && kind == ExperienceKind::Contradiction && source_event_ids.len() < 2 {"
+    },
+    {
+      "id": "zero-experience-retention-limit-accepted",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Evidence retention always has non-zero count and byte ceilings.",
+      "find": "        if maximum_records_per_run == 0 || maximum_record_bytes == 0 {",
+      "replace": "        if false && (maximum_records_per_run == 0 || maximum_record_bytes == 0) {"
+    },
+    {
+      "id": "experience-retention-ceiling-ignored",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Restart-stable combined trace and experience counts cannot exceed the per-run ceiling.",
+      "find": "        if count >= self.limits.maximum_records_per_run {",
+      "replace": "        if false && count >= self.limits.maximum_records_per_run {"
+    },
+    {
+      "id": "oversized-experience-artifact-accepted",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Redacted trace and experience artifacts cannot exceed their byte ceiling.",
+      "find": "        if bytes.len() > self.limits.maximum_record_bytes {",
+      "replace": "        if false && bytes.len() > self.limits.maximum_record_bytes {"
+    },
+    {
+      "id": "sensitive-experience-field-persisted",
+      "file": "crates/hephaestus-experience/src/redaction.rs",
+      "invariant": "Values under credential-bearing field names are removed before persistence.",
+      "find": "            let next = if sensitive_key(key) {",
+      "replace": "            let next = if false && sensitive_key(key) {"
+    },
+    {
+      "id": "known-secret-literal-persisted",
+      "file": "crates/hephaestus-experience/src/redaction.rs",
+      "invariant": "Runtime-known secret literals are removed from otherwise safe fields before persistence.",
+      "find": "        for secret in &self.known_secrets {\n            redacted = redacted.replace(secret, \"[REDACTED]\");\n        }",
+      "replace": "        for _secret in &self.known_secrets {}"
+    },
+    {
+      "id": "prefixed-provider-token-persisted",
+      "file": "crates/hephaestus-experience/src/redaction.rs",
+      "invariant": "Recognizable bearer and provider token forms are removed before persistence.",
+      "find": "        redact_prefixed_tokens(&redacted)",
+      "replace": "        redacted"
+    },
+    {
+      "id": "unknown-experience-source-accepted",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Every experience source ID resolves in verified canonical history.",
+      "find": "            let event = known_events\n                .get(source)\n                .ok_or_else(|| ExperienceError::UnknownSourceEvent(source.clone()))?;",
+      "replace": "            let event = known_events\n                .values()\n                .next()\n                .ok_or_else(|| ExperienceError::UnknownSourceEvent(source.clone()))?;"
+    },
+    {
+      "id": "cross-provenance-experience-source-accepted",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Derived experience provenance exactly matches every cited source record.",
+      "find": "            if source_provenance(event)? != input.provenance {",
+      "replace": "            if false && source_provenance(event)? != input.provenance {"
+    },
+    {
+      "id": "missing-experience-evidence-artifact-accepted",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Every cited evidence artifact exists and verifies by content address.",
+      "find": "            self.artifacts.get(&id)?;",
+      "replace": "            let _unverified = id;"
+    },
+    {
+      "id": "raw-experience-presented-as-gene",
+      "file": "crates/hephaestus-experience/src/recorder.rs",
+      "invariant": "Raw experience remains unverified and cannot be represented as a Gene without Arena evidence.",
+      "find": "            status: \"unverified\".to_owned(),",
+      "replace": "            status: \"gene\".to_owned(),"
     }
   ]
 }

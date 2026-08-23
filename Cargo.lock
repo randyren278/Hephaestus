@@ -319,6 +319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hephaestus-experience"
+version = "0.1.0"
+dependencies = [
+ "hephaestus-ledger",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hephaestus-genome"
 version = "0.1.0"
 dependencies = [

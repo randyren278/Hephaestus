@@ -2,6 +2,7 @@
 members = [
     "crates/hephaestus-core",
     "crates/hephaestus-control",
+    "crates/hephaestus-experience",
     "crates/hephaestus-genome",
     "crates/hephaestus-ledger",
     "crates/hephaestus-runtime",
