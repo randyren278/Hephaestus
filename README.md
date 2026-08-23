@@ -21,6 +21,7 @@ Install the stable Rust toolchain with the `clippy`, `rustfmt`, and `llvm-tools-
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
+PYTHONPATH=python python3 -m unittest discover -s python/tests -v
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
 python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 106

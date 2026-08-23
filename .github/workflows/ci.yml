@@ -36,6 +36,9 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets --all-features
 
+      - name: Deterministic research statistics
+        run: PYTHONPATH=python python -m unittest discover -s python/tests -v
+
       - name: Tests with branch coverage
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
