@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/hephaestus-arena",
     "crates/hephaestus-core",
     "crates/hephaestus-control",
     "crates/hephaestus-experience",

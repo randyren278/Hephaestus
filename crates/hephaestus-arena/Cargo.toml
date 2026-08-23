@@ -1,0 +1,18 @@
+[package]
+name = "hephaestus-arena"
+description = "Deterministic, sealed evaluation for Hephaestus candidates"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+hephaestus-ledger = { path = "../hephaestus-ledger" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
