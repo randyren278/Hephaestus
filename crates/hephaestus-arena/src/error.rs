@@ -47,10 +47,10 @@ pub enum ArenaError {
     TaskSetMismatch { submission_id: String },
     /// A referenced canonical runtime result event does not exist.
     UnknownRunEvent(String),
+    /// A requested canonical evaluation event does not exist.
+    UnknownEvaluation(String),
     /// A runtime receipt failed its canonical envelope or schema validation.
     RunReceipt(ExperienceError),
-    /// A trial did not terminate successfully.
-    RunNotSuccessful(String),
     /// A trial ran under a different compiled World.
     RunWorldMismatch(String),
     /// One submission mixes trials from different immutable Genomes.
@@ -59,6 +59,8 @@ pub enum ArenaError {
     SourceRevisionMismatch(String),
     /// A runtime stdout artifact is not bounded UTF-8 evaluator input.
     InvalidRunOutput(String),
+    /// Authenticated run metrics could not be aggregated without overflow.
+    MetricOverflow(&'static str),
     /// An existing deterministic evaluation identity has different canonical contents.
     EvaluationConflict(String),
     /// A stored operator receipt is malformed or inconsistent with its ledger metadata.

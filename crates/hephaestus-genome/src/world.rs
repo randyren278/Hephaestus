@@ -17,6 +17,7 @@ pub struct CompiledWorld {
     canonical_json: Vec<u8>,
     name: String,
     authority_ceiling: CapabilitySet,
+    mutation_scope: Vec<MutationTarget>,
     objectives: Vec<String>,
     evaluator_artifacts: BTreeMap<String, String>,
     evaluation_policy: WorldEvaluationPolicy,
@@ -80,6 +81,12 @@ impl CompiledWorld {
     #[must_use]
     pub const fn authority_ceiling(&self) -> CapabilitySet {
         self.authority_ceiling
+    }
+
+    /// Returns the normalized mutation targets authorized by this World.
+    #[must_use]
+    pub fn mutation_scope(&self) -> &[MutationTarget] {
+        &self.mutation_scope
     }
 
     /// Returns the normalized objective names bound into this World.
@@ -181,6 +188,7 @@ pub fn compile_world(
         canonical_json,
         name: raw.name,
         authority_ceiling,
+        mutation_scope: raw.mutation_scope,
         objectives: raw.objectives,
         evaluator_artifacts: raw.evaluator_artifacts,
         evaluation_policy,

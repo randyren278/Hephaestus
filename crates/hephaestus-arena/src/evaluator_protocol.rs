@@ -25,6 +25,10 @@ pub struct EvaluatorTrial {
     pub parent_output: String,
     /// Immutable candidate output.
     pub candidate_output: String,
+    /// Whether the parent completed successfully.
+    pub parent_reliable: bool,
+    /// Whether the candidate completed successfully.
+    pub candidate_reliable: bool,
 }
 
 /// Evaluator-only request passed over bounded stdin.
@@ -158,8 +162,10 @@ fn score(request: &EvaluatorRequest) -> Result<EvaluatorScores, ArenaError> {
         (false, request.sealed.as_slice()),
     ] {
         for trial in trials {
-            let parent_correct = trial.parent_output == trial.expected_output;
-            let candidate_correct = trial.candidate_output == trial.expected_output;
+            let parent_correct =
+                trial.parent_reliable && trial.parent_output == trial.expected_output;
+            let candidate_correct =
+                trial.candidate_reliable && trial.candidate_output == trial.expected_output;
             if visible {
                 scores.parent_visible_correct += u32::from(parent_correct);
                 scores.candidate_visible_correct += u32::from(candidate_correct);
@@ -188,12 +194,16 @@ mod tests {
                 expected_output: "yes".to_owned(),
                 parent_output: "no".to_owned(),
                 candidate_output: "yes".to_owned(),
+                parent_reliable: true,
+                candidate_reliable: true,
             }],
             sealed: vec![EvaluatorTrial {
                 task_id: "sealed".to_owned(),
                 expected_output: "secret".to_owned(),
                 parent_output: "secret".to_owned(),
                 candidate_output: "wrong".to_owned(),
+                parent_reliable: true,
+                candidate_reliable: true,
             }],
         }
     }
@@ -213,6 +223,18 @@ mod tests {
         for forbidden in ["secret", "\"yes\"", "\"no\"", "task_id", "expected_output"] {
             assert!(!text.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn unreliable_matching_output_is_never_correct() {
+        let mut request = request();
+        request.visible[0].parent_output = "yes".to_owned();
+        request.visible[0].candidate_reliable = false;
+        let response = evaluate_request(&serde_json::to_vec(&request).unwrap()).unwrap();
+        let parsed: EvaluatorResponse = serde_json::from_slice(&response).unwrap();
+        assert_eq!(parsed.scores.parent_visible_correct, 1);
+        assert_eq!(parsed.scores.candidate_visible_correct, 0);
+        assert_eq!(parsed.scores.regressions, 2);
     }
 
     #[test]

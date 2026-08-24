@@ -12,7 +12,7 @@ use hephaestus_runtime::{
 use crate::{
     ArenaError,
     evaluator_protocol::{
-        EvaluatorRequest, EvaluatorResponse, MAX_EVALUATOR_REQUEST_BYTES,
+        EvaluatorRequest, EvaluatorResponse, EvaluatorTrial, MAX_EVALUATOR_REQUEST_BYTES,
         MAX_EVALUATOR_RESPONSE_BYTES,
     },
 };
@@ -212,15 +212,40 @@ fn validate_scores(
     let total = visible_total
         .checked_add(sealed_total)
         .ok_or(ArenaError::TooManyTasks)?;
+    let reliable_count = |trials: &[EvaluatorTrial], parent: bool| {
+        u32::try_from(
+            trials
+                .iter()
+                .filter(|trial| {
+                    if parent {
+                        trial.parent_reliable
+                    } else {
+                        trial.candidate_reliable
+                    }
+                })
+                .count(),
+        )
+        .map_err(|_| ArenaError::TooManyTasks)
+    };
+    let parent_visible_reliable = reliable_count(&request.visible, true)?;
+    let candidate_visible_reliable = reliable_count(&request.visible, false)?;
+    let parent_sealed_reliable = reliable_count(&request.sealed, true)?;
+    let candidate_sealed_reliable = reliable_count(&request.sealed, false)?;
+    let parent_correct =
+        i64::from(scores.parent_visible_correct) + i64::from(scores.parent_sealed_correct);
+    let candidate_correct =
+        i64::from(scores.candidate_visible_correct) + i64::from(scores.candidate_sealed_correct);
+    let paired_delta = i64::from(scores.improvements) - i64::from(scores.regressions);
     if scores.visible_total != visible_total
         || scores.sealed_total != sealed_total
-        || scores.parent_visible_correct > visible_total
-        || scores.candidate_visible_correct > visible_total
-        || scores.parent_sealed_correct > sealed_total
-        || scores.candidate_sealed_correct > sealed_total
+        || scores.parent_visible_correct > parent_visible_reliable
+        || scores.candidate_visible_correct > candidate_visible_reliable
+        || scores.parent_sealed_correct > parent_sealed_reliable
+        || scores.candidate_sealed_correct > candidate_sealed_reliable
         || scores.regressions > total
         || scores.improvements > total
         || scores.regressions.saturating_add(scores.improvements) > total
+        || candidate_correct - parent_correct != paired_delta
     {
         return Err(ArenaError::EvaluatorProtocol("invalid aggregate scores"));
     }
@@ -250,6 +275,8 @@ mod tests {
             expected_output: "expected".to_owned(),
             parent_output: "expected".to_owned(),
             candidate_output: "candidate".to_owned(),
+            parent_reliable: true,
+            candidate_reliable: true,
         };
         EvaluatorRequest {
             schema_version: 1,
@@ -319,6 +346,39 @@ mod tests {
             ),
             Err(ArenaError::EvaluatorProtocol("invalid aggregate scores"))
         ));
+
+        response.scores.visible_total = 1;
+        response.scores.parent_visible_correct = 0;
+        response.scores.candidate_visible_correct = 1;
+        response.scores.parent_sealed_correct = 1;
+        response.scores.candidate_sealed_correct = 0;
+        response.scores.regressions = 1;
+        response.scores.improvements = 0;
+        assert!(matches!(
+            validate_response(
+                &serde_json::to_vec(&response).unwrap(),
+                &request_bytes,
+                &mismatched
+            ),
+            Err(ArenaError::EvaluatorProtocol("invalid aggregate scores"))
+        ));
+
+        response.scores.parent_visible_correct = 1;
+        response.scores.candidate_visible_correct = 1;
+        response.scores.regressions = 1;
+        mismatched.visible[0].candidate_reliable = false;
+        let unreliable_request_bytes = serde_json::to_vec(&mismatched).unwrap();
+        response.request_artifact_id = ArtifactId::for_bytes(&unreliable_request_bytes)
+            .as_str()
+            .to_owned();
+        assert!(matches!(
+            validate_response(
+                &serde_json::to_vec(&response).unwrap(),
+                &unreliable_request_bytes,
+                &mismatched
+            ),
+            Err(ArenaError::EvaluatorProtocol("invalid aggregate scores"))
+        ));
     }
 
     #[test]
@@ -382,7 +442,7 @@ mod tests {
     #[test]
     fn oversized_worker_response_is_rejected_after_bounded_capture() {
         let directory = tempdir().unwrap();
-        let script = b"#!/bin/sh\nhead -c 65537 /dev/zero\n";
+        let script = b"#!/bin/sh\ncat >/dev/null\nhead -c 65537 /dev/zero\n";
         let (path, id) = executable(directory.path(), script);
         let evaluator = IsolatedEvaluator::open_with_policy(
             directory.path().join("runs"),

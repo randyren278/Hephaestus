@@ -63,7 +63,7 @@ jobs:
         include:
           - scope: hephaestus-arena
             prefix: crates/hephaestus-arena/
-            minimum: 23
+            minimum: 32
             timeout_minutes: 20
           - scope: hephaestus-core
             prefix: crates/hephaestus-core/
@@ -75,7 +75,7 @@ jobs:
             timeout_minutes: 20
           - scope: hephaestus-genome
             prefix: crates/hephaestus-genome/
-            minimum: 13
+            minimum: 14
             timeout_minutes: 20
           - scope: hephaestus-control
             prefix: crates/hephaestus-control/

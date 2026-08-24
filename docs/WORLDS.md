@@ -6,6 +6,8 @@ A World is the versioned root of evaluation semantics. Its content-derived ident
 
 The schema 1 compiler rejects candidate evaluator access, mutation scopes containing Laws or evaluators, confidence outside 1 through 10,000 basis points, empty or blank objectives, and missing or corrupted evaluator artifacts. It sorts and deduplicates mutation targets and objectives before producing canonical JSON and `hephaestus:world:<blake3>`.
 
+The compiled World retains that normalized, already-authorized mutation scope for future trusted Forge enforcement. The read-only `mutation_scope()` view does not grant mutation authority to a candidate; protected Law and evaluator targets remain impossible to compile into the World.
+
 Evaluator artifacts are verified through the same content-addressed store used by Genomes. Candidates receive identities and policy outcomes, never evaluator bytes or hidden scoring internals.
 
 The current measurement Arena reserves four evaluator artifact names in a compiled World: `arena.visible_manifest`, `arena.sealed_manifest`, `arena.evaluator`, and `arena.runtime_verifier`. It hashes manifest bytes and requires each hash to equal the corresponding World commitment, then rehydrates only supported, expected-visibility, byte-exact canonical manifests. The verifier artifact contains the 32-byte Ed25519 public key authorized to attest runtime results; the signing seed remains daemon-only. `arena.evaluator` commits the exact executable bytes used by the process-backed exact-match evaluator; any different executable identity fails closed.

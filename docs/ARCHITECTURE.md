@@ -35,7 +35,7 @@ flowchart TD
     Experience --> Event
     Event --> Arena[Runtime-provenance Arena]
     World --> Arena
-    Daemon --> Signed[Signed run results]
+    Daemon --> Signed[Signed terminal run results]
     Signed --> Event
     World --> Verifier[Producer public key]
     Verifier --> Arena
@@ -50,6 +50,10 @@ flowchart TD
     CandidateRun --> Arena
     Pair --> Evaluator[World-hashed isolated evaluator]
     Evaluator --> Arena
+    Arena --> EvalEvent[Verified evaluation event]
+    EvalEvent --> SafeSummary[Candidate-safe visible summary]
+    EvalEvent --> OperatorEvidence[Operator-only aggregate selection evidence]
+    OperatorEvidence -. pending .-> Selection[Deterministic selection]
     Sandbox --> Codex[Codex driver]
     Sandbox --> Claude[Claude driver]
     Sandbox --> Reference[Offline reference runtime]
@@ -57,13 +61,13 @@ flowchart TD
 
 ## Trust boundary
 
-The authority, domain, compiler, Genome, World, event-store, artifact-store, runtime, isolation, control, and Experience modules named by `checks/checks.json` are production-critical. The manifest sets a 95% per-module coverage floor and deliberate source mutations for implemented invariants. Mutation commands and timeouts resolve by longest file-prefix match, while an explicit CLI test command overrides every scoped command. Each suite runs in a fresh process group; timeout or interruption terminates and waits for descendants before byte-exact source restoration. The mutation ratchet may only increase.
+The authority, domain, compiler, Genome, World, event-store, artifact-store, runtime, isolation, control, Experience, Arena, evaluator-protocol, and isolated-evaluator modules named by `checks/checks.json` are production-critical. The manifest sets a 95% per-module coverage floor and deliberate source mutations for implemented invariants. Mutation commands and timeouts resolve by longest file-prefix match, while an explicit CLI test command overrides every scoped command. Each suite runs in a fresh process group; timeout or interruption terminates and waits for descendants before byte-exact source restoration. The mutation ratchet may only increase.
 
 ## Repository map
 
 - `crates/hephaestus-core/` — shared trust primitives.
 - `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
-- `crates/hephaestus-arena/` — World-bound deterministic paired measurement, strict manifest rehydration, operator-safe task scheduling views, and sealed receipts.
+- `crates/hephaestus-arena/` — World-bound deterministic paired measurement, strict manifest rehydration, operator-safe task scheduling, authenticated terminal metrics, sealed receipts, and restart-safe event-bound selection evidence.
 - `crates/hephaestus-experience/` — redacted traces, runtime evidence integration, and provenance-backed experience.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.

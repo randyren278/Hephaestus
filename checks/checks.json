@@ -228,6 +228,13 @@
       "replace": "    for _target in &raw.mutation_scope {}"
     },
     {
+      "id": "authorized-world-scope-discarded",
+      "file": "crates/hephaestus-genome/src/world.rs",
+      "invariant": "A compiled World retains its normalized authorized mutation scope for Forge enforcement.",
+      "find": "        mutation_scope: raw.mutation_scope,",
+      "replace": "        mutation_scope: Vec::new(),"
+    },
+    {
       "id": "invalid-promotion-confidence-accepted",
       "file": "crates/hephaestus-genome/src/world.rs",
       "invariant": "Promotion confidence is a non-zero basis-point probability.",
@@ -937,9 +944,9 @@
     {
       "id": "arena-failed-run-scored",
       "file": "crates/hephaestus-arena/src/lib.rs",
-      "invariant": "Only successfully completed canonical runs may contribute Arena outputs.",
-      "find": "        if receipt.completion_reason != RunCompletionReason::Success {",
-      "replace": "        if false && receipt.completion_reason != RunCompletionReason::Success {"
+      "invariant": "A non-successful authenticated run remains evidence but is marked unreliable and cannot contribute a correct output.",
+      "find": "        let completed_successfully = receipt.completion_reason == RunCompletionReason::Success;",
+      "replace": "        let completed_successfully = true;"
     },
     {
       "id": "arena-cross-world-run-scored",
@@ -1297,6 +1304,69 @@
       "invariant": "Paired candidate trials execute through the supervised offline process adapter.",
       "find": "        let runtime = SupervisedRuntime::deterministic(isolation, \"/bin/cat\", [])",
       "replace": "        let runtime = SupervisedRuntime::deterministic(isolation, \"/usr/bin/true\", [])"
+    },
+    {
+      "id": "arena-evaluator-reliability-ignored",
+      "file": "crates/hephaestus-arena/src/evaluator_protocol.rs",
+      "invariant": "Exact output is correct only when the authenticated run completed successfully.",
+      "find": "            let parent_correct =\n                trial.parent_reliable && trial.parent_output == trial.expected_output;\n            let candidate_correct =\n                trial.candidate_reliable && trial.candidate_output == trial.expected_output;",
+      "replace": "            let parent_correct = trial.parent_output == trial.expected_output;\n            let candidate_correct = trial.candidate_output == trial.expected_output;"
+    },
+    {
+      "id": "arena-authenticated-latency-discarded",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Selection evidence aggregates terminal latency from every authenticated run receipt.",
+      "find": "            .checked_add(receipt.latency_millis)",
+      "replace": "            .checked_add(0)"
+    },
+    {
+      "id": "arena-selection-event-hash-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Selection evidence identifies the exact verified canonical evaluation event.",
+      "find": "        evaluation_event_hash: encode_hash(event_hash),",
+      "replace": "        evaluation_event_hash: encode_hash([0; 32]),"
+    },
+    {
+      "id": "arena-stored-aggregate-validation-bypassed",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Reopened selection evidence rejects impossible aggregate metrics.",
+      "find": "    validate_operator_receipt(&receipt)?;\n    Ok(receipt)\n}\n\nfn verify_submission_evidence(",
+      "replace": "    Ok(receipt)\n}\n\nfn verify_submission_evidence("
+    },
+    {
+      "id": "arena-selection-unchanged-miscomputed",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Unchanged paired outcomes equal total trials minus regressions and improvements.",
+      "find": "        .checked_sub(changed)",
+      "replace": "        .checked_sub(0)"
+    },
+    {
+      "id": "arena-evaluator-aggregate-algebra-unchecked",
+      "file": "crates/hephaestus-arena/src/isolated_evaluator.rs",
+      "invariant": "Evaluator correctness totals agree with the paired regression and improvement histogram.",
+      "find": "        || candidate_correct - parent_correct != paired_delta",
+      "replace": "        || false && candidate_correct - parent_correct != paired_delta"
+    },
+    {
+      "id": "arena-evaluator-unreliable-correctness-accepted",
+      "file": "crates/hephaestus-arena/src/isolated_evaluator.rs",
+      "invariant": "An evaluator cannot claim more correct visible candidate trials than authenticated successful trials.",
+      "find": "        || scores.candidate_visible_correct > candidate_visible_reliable",
+      "replace": "        || false && scores.candidate_visible_correct > candidate_visible_reliable"
+    },
+    {
+      "id": "arena-rehydration-evaluator-artifact-unchecked",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Restart rehydration requires the exact World-bound evaluator artifact.",
+      "find": "    verify_operator_artifact(artifacts, &receipt.evaluator_id)?;",
+      "replace": ""
+    },
+    {
+      "id": "arena-rehydration-transitive-artifact-unchecked",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Restart rehydration verifies every transitive run output, diagnostic, and trace artifact.",
+      "find": "            verify_operator_artifact(artifacts, referenced)?;",
+      "replace": ""
     }
   ]
 }

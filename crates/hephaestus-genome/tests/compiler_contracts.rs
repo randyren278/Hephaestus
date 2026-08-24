@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs};
 
-use hephaestus_core::authority::CapabilitySet;
+use hephaestus_core::{authority::CapabilitySet, domain::MutationTarget};
 use hephaestus_genome::{
     CompileError, CompiledGenome, CompiledWorld, SourceFormat, compile_genome, compile_world,
     ensure_comparable,
@@ -227,6 +227,7 @@ fn world_compilation_protects_laws_evaluators_and_comparability() {
         baseline.objectives(),
         ["correctness", "cost", "latency", "reliability"]
     );
+    assert_eq!(baseline.mutation_scope(), [MutationTarget::Harness]);
     assert_eq!(
         baseline.evaluator_artifact("sealed"),
         Some(evaluator.as_str())

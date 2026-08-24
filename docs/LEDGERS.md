@@ -16,6 +16,12 @@ Replay requires contiguous sequences, exact predecessor links, 32-byte hashes, a
 
 The CAS root is a daemon-owned trust boundary. Before an external API exists, the daemon milestone must create it with owner-only permissions and prevent candidate sandboxes from accessing it.
 
+## Arena evaluation evidence
+
+Arena consumes only authenticated `run.result_recorded` events from verified history. Its evaluator-owned submission evidence commits each signed run event identity and hash, source revision, completion reason, latency, actual cost, and bounded output, diagnostic, and trace artifact identities. The final operator receipt binds those submissions to the exact World, seed, environment, evaluator, hard budget, parent and candidate Genomes, and aggregate scores. The resulting evaluation event hash commits to that exact receipt.
+
+An `OperatorEvaluation` may derive aggregate `SelectionEvidence` from that detailed receipt. The aggregate deliberately removes task identities and order, inputs, expectations, outputs, and artifact addresses while retaining the event binding, correctness outcomes, reliability, cost, and latency needed by the future deterministic selection engine. It is an operator capability, not a replacement for the evaluator-owned receipt or a promotion decision.
+
 ## Current failure evidence
 
 Integration tests use actual on-disk SQLite and artifact directories. They reopen after writes, inject payload, link, sequence, and artifact corruption through independent filesystem/database handles, and require deterministic integrity errors. No database or artifact store is mocked.

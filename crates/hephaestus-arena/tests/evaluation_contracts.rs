@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
@@ -10,14 +11,14 @@ use std::{
 use hephaestus_arena::{
     ArenaError, EvaluationBinding, EvaluationInputs, EvaluationStores, IsolatedEvaluator,
     OperatorEvaluation, ReceiptContext, TrialPlan, TrustedManifest, TrustedTask, Visibility,
-    evaluate_and_record,
+    evaluate_and_record, load_operator_evaluation,
 };
 use hephaestus_core::authority::CapabilitySet;
 use hephaestus_experience::{
     RunBudgetReceipt, RunCompletionReason, RunResultReceipt, RunResultSigner,
 };
 use hephaestus_genome::{CompiledWorld, SourceFormat, compile_genome, compile_world};
-use hephaestus_ledger::ArtifactId;
+use hephaestus_ledger::{ArtifactId, EventInput};
 use hephaestus_runtime::{Budget, ExperimentContext, IsolationPolicy, RunSpec, WorkerLimits};
 use tempfile::TempDir;
 
@@ -105,7 +106,7 @@ fn append_run(
         input,
         42,
         "environment-v1",
-        Budget::new(Duration::from_secs(10), 1_048_576, 0).unwrap(),
+        Budget::new(Duration::from_secs(10), 1_048_576, 100).unwrap(),
         reason,
         output,
     )
@@ -127,6 +128,45 @@ fn append_run_with_context(
     budget: Budget,
     reason: RunCompletionReason,
     output: &[u8],
+) -> String {
+    append_run_with_observations(
+        stores,
+        signer,
+        repository,
+        run_id,
+        genome_id,
+        world_id,
+        revision,
+        task_id,
+        input,
+        seed,
+        environment_id,
+        budget,
+        reason,
+        output,
+        1,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_run_with_observations(
+    stores: &mut EvaluationStores,
+    signer: &RunResultSigner,
+    repository: &Path,
+    run_id: &str,
+    genome_id: &str,
+    world_id: &str,
+    revision: &str,
+    task_id: &str,
+    input: &str,
+    seed: u64,
+    environment_id: &str,
+    budget: Budget,
+    reason: RunCompletionReason,
+    output: &[u8],
+    latency_millis: u64,
+    actual_cost_microusd: u64,
 ) -> String {
     let stdout = stores.artifacts.put(output).unwrap();
     let stderr = stores.artifacts.put(b"").unwrap();
@@ -150,8 +190,8 @@ fn append_run_with_context(
     let receipt = RunResultReceipt::from_run_spec(
         &spec,
         reason,
-        1,
-        0,
+        latency_millis,
+        actual_cost_microusd,
         stdout.as_str(),
         stderr.as_str(),
         vec![trace.as_str().to_owned()],
@@ -220,7 +260,7 @@ fn make_fixture_with_evaluator(directory: &TempDir, evaluator_path: PathBuf) -> 
         .put(&signer.verifier().public_key_bytes())
         .unwrap();
     let source = format!(
-        r#"{{"schema_version":1,"name":"arena-world","laws":{{"candidate_network":false,"candidate_evaluator_access":false,"maximum_cost_microusd":0}},"authority_ceiling":{{"workspace_write":false,"network":false}},"mutation_scope":["harness"],"promotion":{{"minimum_delta_bps":1,"maximum_regressions":0,"confidence_bps":9500}},"objectives":["correctness"],"evaluator_artifacts":{{"arena.visible_manifest":"{}","arena.sealed_manifest":"{}","arena.evaluator":"{}","arena.runtime_verifier":"{}"}}}}"#,
+        r#"{{"schema_version":1,"name":"arena-world","laws":{{"candidate_network":false,"candidate_evaluator_access":false,"maximum_cost_microusd":100}},"authority_ceiling":{{"workspace_write":false,"network":false}},"mutation_scope":["harness"],"promotion":{{"minimum_delta_bps":1,"maximum_regressions":0,"confidence_bps":9500}},"objectives":["correctness"],"evaluator_artifacts":{{"arena.visible_manifest":"{}","arena.sealed_manifest":"{}","arena.evaluator":"{}","arena.runtime_verifier":"{}"}}}}"#,
         visible_id.as_str(),
         sealed_id.as_str(),
         evaluator_id.as_str(),
@@ -314,7 +354,7 @@ fn budget_receipt() -> RunBudgetReceipt {
     RunBudgetReceipt {
         wall_millis: 10_000,
         maximum_output_bytes: 1_048_576,
-        maximum_cost_microusd: 0,
+        maximum_cost_microusd: 100,
     }
 }
 
@@ -484,6 +524,252 @@ fn records_world_bound_runtime_derived_safe_evaluation() {
     for forbidden in ["OperatorReceipt", "EvaluationStores", SEALED_SECRET] {
         assert!(!candidate_debug.contains(forbidden));
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn operator_selection_evidence_retains_only_authenticated_aggregates() {
+    let directory = TempDir::new().unwrap();
+    let operator = evaluate(make_fixture(&directory)).unwrap();
+    let evidence = operator.selection_evidence();
+
+    assert_eq!(evidence.schema_version(), 1);
+    assert_eq!(evidence.evaluation_id(), "evaluation-001");
+    assert_eq!(
+        evidence.evaluation_event_id(),
+        "arena:evaluation:evaluation-001:recorded"
+    );
+    assert!(evidence.world_id().starts_with("hephaestus:world:"));
+    assert_eq!(evidence.seed(), 42);
+    assert_eq!(evidence.environment_id(), "environment-v1");
+    assert_eq!(evidence.evaluator_id().len(), 64);
+    assert_eq!(evidence.budget(), budget_receipt());
+    assert!(
+        evidence
+            .parent_genome_id()
+            .starts_with("hephaestus:genome:")
+    );
+    assert!(
+        evidence
+            .candidate_genome_id()
+            .starts_with("hephaestus:genome:")
+    );
+    assert_eq!(evidence.visible_total(), 2);
+    assert_eq!(evidence.sealed_total(), 2);
+    assert_eq!(evidence.correctness_outcomes().regressions(), 1);
+    assert_eq!(evidence.correctness_outcomes().unchanged(), 2);
+    assert_eq!(evidence.correctness_outcomes().improvements(), 1);
+    assert_eq!(evidence.parent_fitness().correct_trials(), 3);
+    assert_eq!(evidence.candidate_fitness().correct_trials(), 3);
+    assert_eq!(evidence.parent_fitness().total_trials(), 4);
+    assert_eq!(evidence.candidate_fitness().total_trials(), 4);
+    assert_eq!(evidence.parent_fitness().reliable_trials(), 4);
+    assert_eq!(evidence.candidate_fitness().reliable_trials(), 4);
+    assert_eq!(evidence.parent_fitness().total_cost_microusd(), 0);
+    assert_eq!(evidence.candidate_fitness().total_latency_millis(), 4);
+
+    let serialized = serde_json::to_string(&evidence).unwrap();
+    let value = serde_json::from_str::<serde_json::Value>(&serialized).unwrap();
+    let keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from([
+            "budget",
+            "candidate_fitness",
+            "candidate_genome_id",
+            "candidate_sealed_correct",
+            "candidate_visible_correct",
+            "correctness_outcomes",
+            "environment_id",
+            "evaluation_event_hash",
+            "evaluation_event_id",
+            "evaluation_id",
+            "evaluator_id",
+            "parent_fitness",
+            "parent_genome_id",
+            "parent_sealed_correct",
+            "parent_visible_correct",
+            "schema_version",
+            "sealed_total",
+            "seed",
+            "visible_total",
+            "world_id",
+        ])
+    );
+    for forbidden in [
+        "task-visible-a",
+        "task-sealed-a",
+        "input visible a",
+        "sealed prompt 204",
+        VISIBLE_SECRET,
+        SEALED_SECRET,
+        "manifest_artifact_id",
+        "submission_artifact_id",
+        "trace_artifact_ids",
+    ] {
+        assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+    }
+
+    let stores = operator.into_stores();
+    let event = stores
+        .events
+        .replay_verified()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_id == "arena:evaluation:evaluation-001:recorded")
+        .unwrap();
+    let mut expected_hash = String::with_capacity(64);
+    for byte in event.hash {
+        write!(&mut expected_hash, "{byte:02x}").unwrap();
+    }
+    assert_eq!(evidence.evaluation_event_hash(), expected_hash);
+    assert!(
+        evidence
+            .evaluation_event_hash()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+}
+
+#[test]
+fn terminal_failure_is_paired_as_unreliable_incorrect_with_cost_and_latency() {
+    let directory = TempDir::new().unwrap();
+    let mut fixture = make_fixture(&directory);
+    let failed = append_run_with_observations(
+        &mut fixture.stores,
+        &fixture.signer,
+        &fixture.repository,
+        "candidate-failed-visible-a",
+        &fixture.candidate_genome_id,
+        fixture.world.id(),
+        &fixture.revision,
+        "task-visible-a",
+        task_input("task-visible-a"),
+        42,
+        "environment-v1",
+        Budget::new(Duration::from_secs(10), 1_048_576, 100).unwrap(),
+        RunCompletionReason::OutputBudgetExceeded,
+        VISIBLE_SECRET.as_bytes(),
+        33,
+        0,
+    );
+    fixture.candidate = plan("candidate", Some(("task-visible-a", &failed)));
+
+    let operator = evaluate(fixture).unwrap();
+    let evidence = operator.selection_evidence();
+    assert_eq!(evidence.candidate_fitness().reliable_trials(), 3);
+    assert_eq!(evidence.candidate_fitness().correct_trials(), 2);
+    assert_eq!(evidence.candidate_fitness().total_cost_microusd(), 0);
+    assert_eq!(evidence.candidate_fitness().total_latency_millis(), 36);
+    assert_eq!(evidence.correctness_outcomes().regressions(), 2);
+    assert_eq!(evidence.correctness_outcomes().unchanged(), 1);
+    assert_eq!(evidence.correctness_outcomes().improvements(), 1);
+}
+
+#[test]
+fn operator_selection_evidence_rehydrates_identically_after_restart() {
+    let directory = TempDir::new().unwrap();
+    let operator = evaluate(make_fixture(&directory)).unwrap();
+    let expected = serde_json::to_vec(&operator.selection_evidence()).unwrap();
+    drop(operator.into_stores());
+
+    let stores = EvaluationStores::open(
+        directory.path().join("events.sqlite3"),
+        directory.path().join("blobs"),
+    )
+    .unwrap();
+    let rehydrated = load_operator_evaluation(stores, "evaluation-001").unwrap();
+    assert_eq!(
+        serde_json::to_vec(&rehydrated.selection_evidence()).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn restart_rehydration_requires_world_bound_evaluator_evidence() {
+    let directory = TempDir::new().unwrap();
+    let operator = evaluate(make_fixture(&directory)).unwrap();
+    let evaluator_id = ArtifactId::parse(operator.selection_evidence().evaluator_id()).unwrap();
+    let stores = operator.into_stores();
+    fs::remove_file(stores.artifacts.path_for(&evaluator_id)).unwrap();
+
+    assert!(matches!(
+        load_operator_evaluation(stores, "evaluation-001"),
+        Err(ArenaError::Ledger(_))
+    ));
+}
+
+#[test]
+fn restart_rehydration_requires_transitive_run_artifacts() {
+    let directory = TempDir::new().unwrap();
+    let operator = evaluate(make_fixture(&directory)).unwrap();
+    let stores = operator.into_stores();
+    let stdout_id = stores
+        .events
+        .replay_verified()
+        .unwrap()
+        .into_iter()
+        .find_map(|event| {
+            serde_json::from_slice::<serde_json::Value>(&event.payload)
+                .ok()?
+                .pointer("/claims/stdout_artifact_id")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap();
+    let stdout_id = ArtifactId::parse(stdout_id).unwrap();
+    fs::remove_file(stores.artifacts.path_for(&stdout_id)).unwrap();
+
+    assert!(matches!(
+        load_operator_evaluation(stores, "evaluation-001"),
+        Err(ArenaError::Ledger(_))
+    ));
+}
+
+#[test]
+fn restart_rehydration_rejects_hash_valid_impossible_aggregates() {
+    let directory = TempDir::new().unwrap();
+    let operator = evaluate(make_fixture(&directory)).unwrap();
+    let stores = operator.into_stores();
+    let history = stores.events.replay_verified().unwrap();
+    let mut forged = EvaluationStores::open(
+        directory.path().join("forged.sqlite3"),
+        directory.path().join("blobs"),
+    )
+    .unwrap();
+    for event in history {
+        let payload = if event.event_id == "arena:evaluation:evaluation-001:recorded" {
+            let text = String::from_utf8(event.payload).unwrap();
+            text.replace(
+                "\"regressions\":1,\"improvements\":1",
+                "\"regressions\":1,\"improvements\":0",
+            )
+            .into_bytes()
+        } else {
+            event.payload
+        };
+        forged
+            .events
+            .append(EventInput::new(
+                event.event_id,
+                event.aggregate_id,
+                event.event_type,
+                event.actor,
+                event.timestamp_millis,
+                payload,
+            ))
+            .unwrap();
+    }
+
+    assert!(matches!(
+        load_operator_evaluation(forged, "evaluation-001"),
+        Err(ArenaError::InvalidStoredReceipt("aggregate metrics"))
+    ));
 }
 
 #[test]
@@ -758,7 +1044,7 @@ fn signed_results_cannot_be_relabelled_or_cross_experiment_boundaries() {
         let budget = if matches!(forgery, ContextForgery::Budget) {
             Budget::new(Duration::from_secs(9), 1_048_576, 0).unwrap()
         } else {
-            Budget::new(Duration::from_secs(10), 1_048_576, 0).unwrap()
+            Budget::new(Duration::from_secs(10), 1_048_576, 100).unwrap()
         };
         let forged = append_run_with_context(
             &mut fixture.stores,
@@ -803,7 +1089,7 @@ fn signed_results_cannot_be_relabelled_or_cross_experiment_boundaries() {
 }
 
 #[test]
-fn failed_run_and_cross_world_are_rejected() {
+fn failed_run_is_retained_and_cross_world_is_rejected() {
     let directory = TempDir::new().unwrap();
     let mut fixture = make_fixture(&directory);
     let world_id = fixture.world.id().to_owned();
@@ -835,7 +1121,7 @@ fn failed_run_and_cross_world_are_rejected() {
             evaluator: &fixture.evaluator,
         },
     );
-    assert!(matches!(result, Err(ArenaError::RunNotSuccessful(_))));
+    assert!(result.is_ok());
 
     let directory = TempDir::new().unwrap();
     let mut fixture = make_fixture(&directory);
@@ -906,7 +1192,7 @@ fn corrupt_or_missing_output_is_rejected_without_evaluation_writes() {
         &fixture.revision,
         task_input("task-visible-a"),
         CapabilitySet::new(false, false),
-        Budget::new(Duration::from_secs(10), 1_048_576, 0).unwrap(),
+        Budget::new(Duration::from_secs(10), 1_048_576, 100).unwrap(),
         experiment,
     )
     .unwrap();

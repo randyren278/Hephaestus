@@ -365,6 +365,227 @@ pub struct EvaluationScores {
     pub sealed_total: u32,
 }
 
+/// Paired correctness deltas without task identity, order, or sealed payloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct OutcomeHistogram {
+    regressions: u32,
+    unchanged: u32,
+    improvements: u32,
+}
+
+impl OutcomeHistogram {
+    /// Tasks the parent passed and candidate failed.
+    #[must_use]
+    pub const fn regressions(self) -> u32 {
+        self.regressions
+    }
+
+    /// Tasks on which parent and candidate had the same correctness outcome.
+    #[must_use]
+    pub const fn unchanged(self) -> u32 {
+        self.unchanged
+    }
+
+    /// Tasks the parent failed and candidate passed.
+    #[must_use]
+    pub const fn improvements(self) -> u32 {
+        self.improvements
+    }
+}
+
+/// Aggregate fitness dimensions derived from authenticated paired run receipts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct FitnessEvidence {
+    correct_trials: u32,
+    reliable_trials: u32,
+    total_trials: u32,
+    total_cost_microusd: u64,
+    total_latency_millis: u64,
+}
+
+impl FitnessEvidence {
+    /// Correct task count across visible and sealed trials.
+    #[must_use]
+    pub const fn correct_trials(self) -> u32 {
+        self.correct_trials
+    }
+
+    /// Successfully completed task count.
+    #[must_use]
+    pub const fn reliable_trials(self) -> u32 {
+        self.reliable_trials
+    }
+
+    /// Total paired task count.
+    #[must_use]
+    pub const fn total_trials(self) -> u32 {
+        self.total_trials
+    }
+
+    /// Authenticated aggregate provider cost.
+    #[must_use]
+    pub const fn total_cost_microusd(self) -> u64 {
+        self.total_cost_microusd
+    }
+
+    /// Authenticated aggregate terminal latency.
+    #[must_use]
+    pub const fn total_latency_millis(self) -> u64 {
+        self.total_latency_millis
+    }
+}
+
+/// Trusted aggregate input for statistical selection.
+///
+/// This type has no public constructor and is minted only by an
+/// [`OperatorEvaluation`]. It intentionally omits task identities, task order,
+/// inputs, expectations, outputs, and evaluator-owned artifact addresses.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SelectionEvidence {
+    schema_version: u16,
+    evaluation_id: String,
+    evaluation_event_id: String,
+    evaluation_event_hash: String,
+    world_id: String,
+    seed: u64,
+    environment_id: String,
+    evaluator_id: String,
+    budget: RunBudgetReceipt,
+    parent_genome_id: String,
+    candidate_genome_id: String,
+    visible_total: u32,
+    sealed_total: u32,
+    parent_visible_correct: u32,
+    candidate_visible_correct: u32,
+    parent_sealed_correct: u32,
+    candidate_sealed_correct: u32,
+    correctness_outcomes: OutcomeHistogram,
+    parent_fitness: FitnessEvidence,
+    candidate_fitness: FitnessEvidence,
+}
+
+impl SelectionEvidence {
+    /// Selection evidence schema version.
+    #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    /// Stable Arena evaluation identity.
+    #[must_use]
+    pub fn evaluation_id(&self) -> &str {
+        &self.evaluation_id
+    }
+
+    /// Canonical evaluation event identity.
+    #[must_use]
+    pub fn evaluation_event_id(&self) -> &str {
+        &self.evaluation_event_id
+    }
+
+    /// Lowercase hash of the exact verified ledger event.
+    #[must_use]
+    pub fn evaluation_event_hash(&self) -> &str {
+        &self.evaluation_event_hash
+    }
+
+    /// Exact World identity.
+    #[must_use]
+    pub fn world_id(&self) -> &str {
+        &self.world_id
+    }
+
+    /// Paired bootstrap seed.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Exact paired execution environment identity.
+    #[must_use]
+    pub fn environment_id(&self) -> &str {
+        &self.environment_id
+    }
+
+    /// Exact World-bound evaluator identity.
+    #[must_use]
+    pub fn evaluator_id(&self) -> &str {
+        &self.evaluator_id
+    }
+
+    /// Exact paired hard budget.
+    #[must_use]
+    pub const fn budget(&self) -> RunBudgetReceipt {
+        self.budget
+    }
+
+    /// Immutable parent Genome identity.
+    #[must_use]
+    pub fn parent_genome_id(&self) -> &str {
+        &self.parent_genome_id
+    }
+
+    /// Immutable candidate Genome identity.
+    #[must_use]
+    pub fn candidate_genome_id(&self) -> &str {
+        &self.candidate_genome_id
+    }
+
+    /// Candidate-visible task count.
+    #[must_use]
+    pub const fn visible_total(&self) -> u32 {
+        self.visible_total
+    }
+
+    /// Evaluator-only task count, without payloads or task identities.
+    #[must_use]
+    pub const fn sealed_total(&self) -> u32 {
+        self.sealed_total
+    }
+
+    /// Parent correct count on candidate-visible tasks.
+    #[must_use]
+    pub const fn parent_visible_correct(&self) -> u32 {
+        self.parent_visible_correct
+    }
+
+    /// Candidate correct count on candidate-visible tasks.
+    #[must_use]
+    pub const fn candidate_visible_correct(&self) -> u32 {
+        self.candidate_visible_correct
+    }
+
+    /// Parent correct count on evaluator-only tasks.
+    #[must_use]
+    pub const fn parent_sealed_correct(&self) -> u32 {
+        self.parent_sealed_correct
+    }
+
+    /// Candidate correct count on evaluator-only tasks.
+    #[must_use]
+    pub const fn candidate_sealed_correct(&self) -> u32 {
+        self.candidate_sealed_correct
+    }
+
+    /// Aggregate paired correctness outcomes used by bootstrap selection.
+    #[must_use]
+    pub const fn correctness_outcomes(&self) -> OutcomeHistogram {
+        self.correctness_outcomes
+    }
+
+    /// Parent aggregate fitness evidence.
+    #[must_use]
+    pub const fn parent_fitness(&self) -> FitnessEvidence {
+        self.parent_fitness
+    }
+
+    /// Candidate aggregate fitness evidence.
+    #[must_use]
+    pub const fn candidate_fitness(&self) -> FitnessEvidence {
+        self.candidate_fitness
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorScores {
@@ -376,6 +597,15 @@ struct OperatorScores {
     improvements: u32,
     visible_total: u32,
     sealed_total: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorMetrics {
+    reliable_trials: u32,
+    total_trials: u32,
+    total_cost_microusd: u64,
+    total_latency_millis: u64,
 }
 
 impl From<&OperatorScores> for EvaluationScores {
@@ -442,6 +672,7 @@ struct OperatorReceipt {
     seed: u64,
     environment_id: String,
     evaluator_id: String,
+    budget: RunBudgetReceipt,
     parent_submission_id: String,
     parent_genome_id: String,
     candidate_submission_id: String,
@@ -457,6 +688,8 @@ struct OperatorReceipt {
     /// CAS address of the evaluator-only canonical candidate submission.
     candidate_submission_artifact_id: String,
     scores: OperatorScores,
+    parent_metrics: OperatorMetrics,
+    candidate_metrics: OperatorMetrics,
 }
 
 /// Durable stores owned by one evaluator composition root.
@@ -536,6 +769,16 @@ impl From<&StoredEvent> for EvaluationEvent {
 ///     let _ = result.operator_parent_submission();
 /// }
 /// ```
+///
+/// Statistical selection evidence is operator-only too:
+///
+/// ```compile_fail
+/// use hephaestus_arena::RecordedEvaluation;
+///
+/// fn selection_evidence_is_not_candidate_visible(result: &RecordedEvaluation) {
+///     let _ = result.selection_evidence();
+/// }
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordedEvaluation {
     /// Candidate-safe visible-only result.
@@ -553,6 +796,7 @@ pub struct OperatorEvaluation {
     recorded: RecordedEvaluation,
     stores: EvaluationStores,
     operator_receipt: OperatorReceipt,
+    event_hash: [u8; 32],
 }
 
 impl OperatorEvaluation {
@@ -578,6 +822,24 @@ impl OperatorEvaluation {
     #[must_use]
     pub fn operator_scores(&self) -> EvaluationScores {
         EvaluationScores::from(&self.operator_receipt.scores)
+    }
+
+    /// Produces aggregate, event-bound evidence for trusted statistical selection.
+    ///
+    /// The result contains no task-level or artifact-store capabilities.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal receipt already validated during construction
+    /// no longer satisfies the same aggregate invariants.
+    #[must_use]
+    pub fn selection_evidence(&self) -> SelectionEvidence {
+        selection_evidence(
+            &self.operator_receipt,
+            &self.recorded.event.event_id,
+            self.event_hash,
+        )
+        .expect("stored operator receipts are validated before construction")
     }
 
     /// Reads and verifies the evaluator-only parent submission evidence.
@@ -622,17 +884,23 @@ pub struct EvaluationInputs<'a> {
     pub evaluator: &'a IsolatedEvaluator,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubmissionEvidence {
     schema_version: u16,
     genome_id: String,
     trials: BTreeMap<String, TrialEvidence>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrialEvidence {
     run_result_event_id: String,
+    run_result_event_hash: String,
     source_revision: String,
+    completion_reason: RunCompletionReason,
+    latency_millis: u64,
+    actual_cost_microusd: u64,
     stdout_artifact_id: String,
     stderr_artifact_id: String,
     trace_artifact_ids: Vec<String>,
@@ -642,7 +910,9 @@ struct ResolvedSubmission {
     id: String,
     genome_id: String,
     outputs: BTreeMap<String, String>,
+    reliable: BTreeMap<String, bool>,
     revisions: BTreeMap<String, String>,
+    metrics: OperatorMetrics,
     evidence: Vec<u8>,
 }
 
@@ -736,7 +1006,7 @@ pub fn evaluate_and_record(
         visible_total: aggregate.visible_total,
     };
     let receipt = OperatorReceipt {
-        schema_version: 1,
+        schema_version: 2,
         evaluation_id: context.evaluation_id.clone(),
         caller_id: context.caller_id.clone(),
         timestamp_millis: context.timestamp_millis,
@@ -744,6 +1014,7 @@ pub fn evaluate_and_record(
         seed: binding.seed,
         environment_id: binding.environment_id.clone(),
         evaluator_id: binding.evaluator_id.clone(),
+        budget: binding.budget,
         parent_submission_id: parent.id.clone(),
         parent_genome_id: parent.genome_id.clone(),
         candidate_submission_id: candidate.id.clone(),
@@ -754,15 +1025,19 @@ pub fn evaluate_and_record(
         parent_submission_artifact_id: prepared.parent_submission_id.as_str().to_owned(),
         candidate_submission_artifact_id: prepared.candidate_submission_id.as_str().to_owned(),
         scores: aggregate,
+        parent_metrics: parent.metrics,
+        candidate_metrics: candidate.metrics,
     };
+    validate_operator_receipt(&receipt)?;
     let expected_event_id = canonical_event_id(&context.evaluation_id);
     let expected_aggregate_id = canonical_aggregate_id(&context.evaluation_id);
 
     if let Some(existing) = history
-        .into_iter()
+        .iter()
         .find(|event| event.event_id == expected_event_id)
     {
-        let existing_receipt = rehydrate_operator_receipt(&owned_stores.artifacts, &existing)?;
+        let existing_receipt =
+            rehydrate_operator_receipt(&owned_stores.artifacts, existing, &history)?;
         if existing.aggregate_id != expected_aggregate_id
             || !receipts_match_except_timestamp(&existing_receipt, &receipt)
         {
@@ -771,10 +1046,11 @@ pub fn evaluate_and_record(
         return Ok(OperatorEvaluation {
             recorded: RecordedEvaluation {
                 summary: summary_from_receipt(&existing_receipt),
-                event: EvaluationEvent::from(&existing),
+                event: EvaluationEvent::from(existing),
             },
             stores: owned_stores,
             operator_receipt: existing_receipt,
+            event_hash: existing.hash,
         });
     }
 
@@ -796,6 +1072,36 @@ pub fn evaluate_and_record(
         },
         stores: owned_stores,
         operator_receipt: receipt,
+        event_hash: event.hash,
+    })
+}
+
+/// Rehydrates one trusted evaluation capability from verified canonical history.
+///
+/// # Errors
+///
+/// Fails closed when the identity is malformed or the event, receipt, or any
+/// evaluator-owned evidence artifact is missing or inconsistent.
+pub fn load_operator_evaluation(
+    stores: EvaluationStores,
+    evaluation_id: &str,
+) -> Result<OperatorEvaluation, ArenaError> {
+    validate_id("evaluation_id", evaluation_id)?;
+    let event_id = canonical_event_id(evaluation_id);
+    let history = stores.events.replay_verified()?;
+    let event = history
+        .iter()
+        .find(|event| event.event_id == event_id)
+        .ok_or_else(|| ArenaError::UnknownEvaluation(evaluation_id.to_owned()))?;
+    let receipt = rehydrate_operator_receipt(&stores.artifacts, event, &history)?;
+    Ok(OperatorEvaluation {
+        recorded: RecordedEvaluation {
+            summary: summary_from_receipt(&receipt),
+            event: EvaluationEvent::from(event),
+        },
+        stores,
+        operator_receipt: receipt,
+        event_hash: event.hash,
     })
 }
 
@@ -901,7 +1207,7 @@ fn canonical_aggregate_id(evaluation_id: &str) -> String {
 
 fn summary_from_receipt(receipt: &OperatorReceipt) -> EvaluationSummary {
     EvaluationSummary {
-        schema_version: receipt.schema_version,
+        schema_version: 1,
         evaluation_id: receipt.evaluation_id.clone(),
         world_id: receipt.world_id.clone(),
         parent_genome_id: receipt.parent_genome_id.clone(),
@@ -921,9 +1227,11 @@ fn receipts_match_except_timestamp(left: &OperatorReceipt, right: &OperatorRecei
 fn rehydrate_operator_receipt(
     artifacts: &ArtifactStore,
     event: &StoredEvent,
+    history: &[StoredEvent],
 ) -> Result<OperatorReceipt, ArenaError> {
     let receipt: OperatorReceipt = serde_json::from_slice(&event.payload)?;
-    if receipt.schema_version != 1
+    if receipt.schema_version != 2
+        || serde_json::to_vec(&receipt)? != event.payload
         || event.event_id != canonical_event_id(&receipt.evaluation_id)
         || event.aggregate_id != canonical_aggregate_id(&receipt.evaluation_id)
         || event.event_type != EVENT_TYPE
@@ -941,7 +1249,207 @@ fn rehydrate_operator_receipt(
     ] {
         verify_operator_artifact(artifacts, artifact_id)?;
     }
+    verify_operator_artifact(artifacts, &receipt.evaluator_id)?;
+    verify_submission_evidence(
+        artifacts,
+        history,
+        &receipt.parent_submission_artifact_id,
+        &receipt.parent_submission_id,
+        &receipt.parent_genome_id,
+        receipt.parent_metrics,
+    )?;
+    verify_submission_evidence(
+        artifacts,
+        history,
+        &receipt.candidate_submission_artifact_id,
+        &receipt.candidate_submission_id,
+        &receipt.candidate_genome_id,
+        receipt.candidate_metrics,
+    )?;
+    validate_operator_receipt(&receipt)?;
     Ok(receipt)
+}
+
+fn verify_submission_evidence(
+    artifacts: &ArtifactStore,
+    history: &[StoredEvent],
+    artifact_id: &str,
+    submission_id: &str,
+    genome_id: &str,
+    expected_metrics: OperatorMetrics,
+) -> Result<(), ArenaError> {
+    if submission_id != artifact_id {
+        return Err(ArenaError::InvalidStoredReceipt("submission identity"));
+    }
+    let bytes = verify_operator_artifact(artifacts, artifact_id)?;
+    let evidence: SubmissionEvidence = serde_json::from_slice(&bytes)?;
+    if evidence.schema_version != 1
+        || serde_json::to_vec(&evidence)? != bytes
+        || evidence.genome_id != genome_id
+    {
+        return Err(ArenaError::InvalidStoredReceipt("submission evidence"));
+    }
+    let events = history
+        .iter()
+        .map(|event| (event.event_id.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    let mut metrics = OperatorMetrics {
+        reliable_trials: 0,
+        total_trials: 0,
+        total_cost_microusd: 0,
+        total_latency_millis: 0,
+    };
+    for trial in evidence.trials.values() {
+        let run_event = events
+            .get(trial.run_result_event_id.as_str())
+            .ok_or_else(|| ArenaError::UnknownRunEvent(trial.run_result_event_id.clone()))?;
+        if trial.run_result_event_hash != encode_hash(run_event.hash) {
+            return Err(ArenaError::InvalidStoredReceipt("run event hash"));
+        }
+        for referenced in std::iter::once(&trial.stdout_artifact_id)
+            .chain(std::iter::once(&trial.stderr_artifact_id))
+            .chain(trial.trace_artifact_ids.iter())
+        {
+            verify_operator_artifact(artifacts, referenced)?;
+        }
+        metrics.total_trials = metrics
+            .total_trials
+            .checked_add(1)
+            .ok_or(ArenaError::InvalidStoredReceipt("submission metrics"))?;
+        metrics.reliable_trials = metrics
+            .reliable_trials
+            .checked_add(u32::from(
+                trial.completion_reason == RunCompletionReason::Success,
+            ))
+            .ok_or(ArenaError::InvalidStoredReceipt("submission metrics"))?;
+        metrics.total_cost_microusd = metrics
+            .total_cost_microusd
+            .checked_add(trial.actual_cost_microusd)
+            .ok_or(ArenaError::InvalidStoredReceipt("submission metrics"))?;
+        metrics.total_latency_millis = metrics
+            .total_latency_millis
+            .checked_add(trial.latency_millis)
+            .ok_or(ArenaError::InvalidStoredReceipt("submission metrics"))?;
+    }
+    if metrics != expected_metrics {
+        return Err(ArenaError::InvalidStoredReceipt("submission metrics"));
+    }
+    Ok(())
+}
+
+fn validate_operator_receipt(receipt: &OperatorReceipt) -> Result<(), ArenaError> {
+    let scores = &receipt.scores;
+    let total = scores
+        .visible_total
+        .checked_add(scores.sealed_total)
+        .ok_or(ArenaError::InvalidStoredReceipt("task total"))?;
+    let parent_correct = scores
+        .parent_visible_correct
+        .checked_add(scores.parent_sealed_correct)
+        .ok_or(ArenaError::InvalidStoredReceipt("parent correctness"))?;
+    let candidate_correct = scores
+        .candidate_visible_correct
+        .checked_add(scores.candidate_sealed_correct)
+        .ok_or(ArenaError::InvalidStoredReceipt("candidate correctness"))?;
+    let paired_delta = i64::from(scores.improvements) - i64::from(scores.regressions);
+    if scores.parent_visible_correct > scores.visible_total
+        || scores.candidate_visible_correct > scores.visible_total
+        || scores.parent_sealed_correct > scores.sealed_total
+        || scores.candidate_sealed_correct > scores.sealed_total
+        || scores.regressions > total
+        || scores.improvements > total
+        || scores
+            .regressions
+            .checked_add(scores.improvements)
+            .is_none_or(|changed| changed > total)
+        || receipt.parent_metrics.total_trials != total
+        || receipt.candidate_metrics.total_trials != total
+        || receipt.parent_metrics.reliable_trials > total
+        || receipt.candidate_metrics.reliable_trials > total
+        || parent_correct > receipt.parent_metrics.reliable_trials
+        || candidate_correct > receipt.candidate_metrics.reliable_trials
+        || i64::from(candidate_correct) - i64::from(parent_correct) != paired_delta
+    {
+        return Err(ArenaError::InvalidStoredReceipt("aggregate metrics"));
+    }
+    Ok(())
+}
+
+fn selection_evidence(
+    receipt: &OperatorReceipt,
+    event_id: &str,
+    event_hash: [u8; 32],
+) -> Result<SelectionEvidence, ArenaError> {
+    validate_operator_receipt(receipt)?;
+    let total = receipt
+        .scores
+        .visible_total
+        .checked_add(receipt.scores.sealed_total)
+        .ok_or(ArenaError::InvalidStoredReceipt("task total"))?;
+    let changed = receipt
+        .scores
+        .regressions
+        .checked_add(receipt.scores.improvements)
+        .ok_or(ArenaError::InvalidStoredReceipt("outcome histogram"))?;
+    let unchanged = total
+        .checked_sub(changed)
+        .ok_or(ArenaError::InvalidStoredReceipt("outcome histogram"))?;
+    let parent_correct = receipt
+        .scores
+        .parent_visible_correct
+        .checked_add(receipt.scores.parent_sealed_correct)
+        .ok_or(ArenaError::InvalidStoredReceipt("parent correctness"))?;
+    let candidate_correct = receipt
+        .scores
+        .candidate_visible_correct
+        .checked_add(receipt.scores.candidate_sealed_correct)
+        .ok_or(ArenaError::InvalidStoredReceipt("candidate correctness"))?;
+    Ok(SelectionEvidence {
+        schema_version: 1,
+        evaluation_id: receipt.evaluation_id.clone(),
+        evaluation_event_id: event_id.to_owned(),
+        evaluation_event_hash: encode_hash(event_hash),
+        world_id: receipt.world_id.clone(),
+        seed: receipt.seed,
+        environment_id: receipt.environment_id.clone(),
+        evaluator_id: receipt.evaluator_id.clone(),
+        budget: receipt.budget,
+        parent_genome_id: receipt.parent_genome_id.clone(),
+        candidate_genome_id: receipt.candidate_genome_id.clone(),
+        visible_total: receipt.scores.visible_total,
+        sealed_total: receipt.scores.sealed_total,
+        parent_visible_correct: receipt.scores.parent_visible_correct,
+        candidate_visible_correct: receipt.scores.candidate_visible_correct,
+        parent_sealed_correct: receipt.scores.parent_sealed_correct,
+        candidate_sealed_correct: receipt.scores.candidate_sealed_correct,
+        correctness_outcomes: OutcomeHistogram {
+            regressions: receipt.scores.regressions,
+            unchanged,
+            improvements: receipt.scores.improvements,
+        },
+        parent_fitness: fitness_evidence(parent_correct, receipt.parent_metrics),
+        candidate_fitness: fitness_evidence(candidate_correct, receipt.candidate_metrics),
+    })
+}
+
+const fn fitness_evidence(correct_trials: u32, metrics: OperatorMetrics) -> FitnessEvidence {
+    FitnessEvidence {
+        correct_trials,
+        reliable_trials: metrics.reliable_trials,
+        total_trials: metrics.total_trials,
+        total_cost_microusd: metrics.total_cost_microusd,
+        total_latency_millis: metrics.total_latency_millis,
+    }
+}
+
+fn encode_hash(hash: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in hash {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn validate_evaluation_inputs(
@@ -979,6 +1487,7 @@ fn validate_evaluation_inputs(
     Ok(task_inputs)
 }
 
+#[allow(clippy::too_many_lines)]
 fn resolve_plan(
     plan_name: &'static str,
     plan: &TrialPlan,
@@ -999,17 +1508,18 @@ fn resolve_plan(
         .collect::<BTreeMap<_, _>>();
     let mut genome_id = None;
     let mut outputs = BTreeMap::new();
+    let mut reliable = BTreeMap::new();
     let mut revisions = BTreeMap::new();
     let mut trials = BTreeMap::new();
     let mut output_bytes = 0_usize;
+    let mut reliable_trials = 0_u32;
+    let mut total_cost_microusd = 0_u64;
+    let mut total_latency_millis = 0_u64;
     for (task_id, event_id) in &plan.trials {
         let event = events
             .get(event_id.as_str())
             .ok_or_else(|| ArenaError::UnknownRunEvent(event_id.clone()))?;
         let receipt = RunResultReceipt::parse_from_event(event, run_result_verifier)?;
-        if receipt.completion_reason != RunCompletionReason::Success {
-            return Err(ArenaError::RunNotSuccessful(event_id.clone()));
-        }
         if receipt.world_id != binding.world_id {
             return Err(ArenaError::RunWorldMismatch(event_id.clone()));
         }
@@ -1051,21 +1561,40 @@ fn resolve_plan(
                 limit: MAX_SUBMISSION_OUTPUT_BYTES,
             });
         }
-        let output = String::from_utf8(stdout)
-            .map_err(|_| ArenaError::InvalidRunOutput(event_id.clone()))?;
+        let completed_successfully = receipt.completion_reason == RunCompletionReason::Success;
+        reliable_trials = reliable_trials
+            .checked_add(u32::from(completed_successfully))
+            .ok_or(ArenaError::MetricOverflow("reliable trials"))?;
+        total_cost_microusd = total_cost_microusd
+            .checked_add(receipt.actual_cost_microusd)
+            .ok_or(ArenaError::MetricOverflow("cost"))?;
+        total_latency_millis = total_latency_millis
+            .checked_add(receipt.latency_millis)
+            .ok_or(ArenaError::MetricOverflow("latency"))?;
+        let output = if completed_successfully {
+            String::from_utf8(stdout).map_err(|_| ArenaError::InvalidRunOutput(event_id.clone()))?
+        } else {
+            String::new()
+        };
         outputs.insert(task_id.clone(), output);
+        reliable.insert(task_id.clone(), completed_successfully);
         revisions.insert(task_id.clone(), receipt.source_revision.clone());
         trials.insert(
             task_id.clone(),
             TrialEvidence {
                 run_result_event_id: event_id.clone(),
+                run_result_event_hash: encode_hash(event.hash),
                 source_revision: receipt.source_revision,
+                completion_reason: receipt.completion_reason,
+                latency_millis: receipt.latency_millis,
+                actual_cost_microusd: receipt.actual_cost_microusd,
                 stdout_artifact_id: receipt.stdout_artifact_id,
                 stderr_artifact_id: receipt.stderr_artifact_id,
                 trace_artifact_ids: receipt.trace_artifact_ids,
             },
         );
     }
+    let total_trials = u32::try_from(trials.len()).map_err(|_| ArenaError::TooManyTasks)?;
     let evidence = serde_json::to_vec(&SubmissionEvidence {
         schema_version: 1,
         genome_id: genome_id.clone().ok_or(ArenaError::EmptyManifest)?,
@@ -1075,7 +1604,14 @@ fn resolve_plan(
         id: ArtifactId::for_bytes(&evidence).as_str().to_owned(),
         genome_id: genome_id.ok_or(ArenaError::EmptyManifest)?,
         outputs,
+        reliable,
         revisions,
+        metrics: OperatorMetrics {
+            reliable_trials,
+            total_trials,
+            total_cost_microusd,
+            total_latency_millis,
+        },
         evidence,
     })
 }
@@ -1134,6 +1670,8 @@ fn score_isolated(
                 expected_output: task.expected_output.clone(),
                 parent_output: parent.outputs[&task.task_id].clone(),
                 candidate_output: candidate.outputs[&task.task_id].clone(),
+                parent_reliable: parent.reliable[&task.task_id],
+                candidate_reliable: candidate.reliable[&task.task_id],
             })
             .collect()
     };
