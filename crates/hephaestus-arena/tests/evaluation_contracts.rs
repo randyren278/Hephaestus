@@ -595,6 +595,7 @@ fn isolated_evaluator_response_must_bind_the_exact_request() {
         &evaluator_path,
         concat!(
             "#!/bin/sh\n",
+            "cat >/dev/null\n",
             "printf '%s' '",
             "{\"schema_version\":1,\"request_artifact_id\":\"",
             "0000000000000000000000000000000000000000000000000000000000000000",
@@ -608,12 +609,16 @@ fn isolated_evaluator_response_must_bind_the_exact_request() {
     fs::set_permissions(&evaluator_path, fs::Permissions::from_mode(0o700)).unwrap();
     let fixture = make_fixture_with_evaluator(&directory, evaluator_path);
     let before = artifact_file_count(&directory);
-    assert!(matches!(
-        evaluate(fixture),
-        Err(ArenaError::EvaluatorProtocol(
-            "response request binding mismatch"
-        ))
-    ));
+    let Err(error) = evaluate(fixture) else {
+        panic!("a forged response must fail closed");
+    };
+    assert!(
+        matches!(
+            error,
+            ArenaError::EvaluatorProtocol("response request binding mismatch")
+        ),
+        "unexpected evaluator error: {error:?}"
+    );
     assert_eq!(artifact_file_count(&directory), before);
     assert!(
         directory
