@@ -24,13 +24,10 @@ impl IsolationPolicy {
     /// Detects a supported OS sandbox and records canonical paths workers cannot access.
     #[must_use]
     pub fn detect(protected_paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        let backend = if cfg!(target_os = "macos")
-            && std::path::Path::new("/usr/bin/sandbox-exec").is_file()
-        {
-            IsolationBackend::MacOsSeatbelt
-        } else {
-            IsolationBackend::Unavailable
-        };
+        let backend = detected_backend(
+            cfg!(target_os = "macos"),
+            std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
+        );
         Self {
             backend,
             protected_paths: protected_paths.into_iter().collect(),
@@ -151,6 +148,14 @@ impl IsolationPolicy {
     }
 }
 
+const fn detected_backend(is_macos: bool, seatbelt_exists: bool) -> IsolationBackend {
+    if is_macos && seatbelt_exists {
+        IsolationBackend::MacOsSeatbelt
+    } else {
+        IsolationBackend::Unavailable
+    }
+}
+
 fn build_macos_profile(
     executable: &std::path::Path,
     run_root: &std::path::Path,
@@ -243,6 +248,18 @@ mod tests {
             policy.launcher(),
             Err(RuntimeError::Unsupported(_))
         ));
+        assert_eq!(
+            detected_backend(true, true),
+            IsolationBackend::MacOsSeatbelt
+        );
+        assert_eq!(detected_backend(true, false), IsolationBackend::Unavailable);
+        assert_eq!(detected_backend(false, true), IsolationBackend::Unavailable);
+        assert!(matches!(
+            IsolationPolicy::unconfined_for_testing().launcher(),
+            Err(RuntimeError::Unsupported(
+                "test-only backend has no production launcher"
+            ))
+        ));
     }
 
     #[test]
@@ -291,6 +308,12 @@ mod tests {
         assert_eq!(command.get_program(), "/usr/bin/sandbox-exec");
         assert_eq!(command.get_current_dir(), Some(sandbox.worktree()));
         assert!(command.get_args().any(|argument| argument == "-p"));
+        let worker = policy
+            .worker_command(&invocation, sandbox.execution_dir())
+            .expect("construct worker Seatbelt command");
+        assert_eq!(worker.get_program(), "/usr/bin/sandbox-exec");
+        assert_eq!(worker.get_current_dir(), Some(sandbox.execution_dir()));
+        assert!(worker.get_args().any(|argument| argument == "-p"));
         sandbox.cleanup().expect("clean sandbox");
     }
 
