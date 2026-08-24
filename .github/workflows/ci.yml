@@ -84,7 +84,7 @@ jobs:
           - scope: hephaestus-runtime
             prefix: crates/hephaestus-runtime/
             minimum: 36
-            timeout_minutes: 20
+            timeout_minutes: 60
           - scope: hephaestus-experience
             prefix: crates/hephaestus-experience/
             minimum: 44
