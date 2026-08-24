@@ -13,22 +13,29 @@ use std::{
 };
 
 use fs2::FileExt;
+use hephaestus_arena::{
+    EvaluationBinding, EvaluationInputs, EvaluationStores, IsolatedEvaluator, ReceiptContext,
+    TrialPlan, TrustedManifest, Visibility, evaluate_and_record,
+};
 use hephaestus_core::authority::{CapabilitySet, FreezeState, OperatorToken};
 use hephaestus_experience::{
     EvidenceRecorder, RUN_RESULT_SCHEMA_VERSION, RecordedRuntime, RedactionPolicy, RetentionLimits,
-    RunResultReceipt, RunResultSigner, RunResultVerifier, TraceKind, TraceReceipt,
+    RunBudgetReceipt, RunResultReceipt, RunResultSigner, RunResultVerifier, TraceKind,
+    TraceReceipt,
 };
-use hephaestus_genome::{SourceFormat, compile_world};
+use hephaestus_genome::{CompiledWorld, SourceFormat, compile_world};
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
 use hephaestus_runtime::{
-    Budget, CapabilityToken, CompletionReason, DeterministicRuntime, ExperimentContext, RunSpec,
-    RunStatus, RuntimeAdapter, Sandbox, SandboxManager,
+    Budget, CapabilityToken, CompletionReason, DeterministicRuntime, ExperimentContext,
+    IsolationPolicy, RunSpec, RunStatus, RuntimeAdapter, Sandbox, SandboxManager,
+    SupervisedRuntime, WorkerLimits,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, GenomeRecord,
-    ResponseData, RunCompletionReason, WorldRecord,
+    API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError,
+    EvaluationEventRecord, EvaluationRecord, GenomeRecord, ResponseData, RunCompletionReason,
+    WorldRecord,
 };
 
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -38,6 +45,9 @@ const OPERATOR_ACTOR: &str = "local-operator";
 const MAX_EVALUATION_WALL_MILLIS: u64 = 86_400_000;
 const MAX_EVALUATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVALUATION_COST_MICROUSD: u64 = 1_000_000_000;
+const PAIRED_EVALUATION_SEED: u64 = 42;
+const PAIRED_EVALUATION_WALL_MILLIS: u64 = 10_000;
+const PAIRED_EVALUATION_OUTPUT_BYTES: u64 = 1_048_576;
 
 /// Resolves `HEPHAESTUS_HOME`, then the conventional per-user data directory.
 ///
@@ -58,6 +68,7 @@ pub fn data_dir_from_environment() -> Result<PathBuf, ControlError> {
 pub struct ControlPlane {
     data_dir: PathBuf,
     source_repository: PathBuf,
+    evaluator_executable: PathBuf,
     token_hex: String,
     operator_token: OperatorToken,
     run_result_signer: RunResultSigner,
@@ -123,8 +134,30 @@ impl ControlPlane {
         data_dir: impl Into<PathBuf>,
         source_repository: impl Into<PathBuf>,
     ) -> Result<Self, ControlError> {
+        Self::open_with_repository_and_evaluator(
+            data_dir,
+            source_repository,
+            default_evaluator_executable()?,
+        )
+    }
+
+    /// Opens canonical storage with explicit source and evaluator executables.
+    ///
+    /// The evaluator path is identity-checked against each World at evaluation
+    /// time, so opening the daemon does not grant an unregistered executable.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same fail-closed storage and repository checks as
+    /// [`Self::open_with_repository`].
+    pub fn open_with_repository_and_evaluator(
+        data_dir: impl Into<PathBuf>,
+        source_repository: impl Into<PathBuf>,
+        evaluator_executable: impl Into<PathBuf>,
+    ) -> Result<Self, ControlError> {
         let data_dir = data_dir.into();
         let source_repository = validate_source_repository(&source_repository.into())?;
+        let evaluator_executable = evaluator_executable.into();
         prepare_private_directory(&data_dir)?;
         let lock = take_writer_lock(&data_dir.join("daemon.lock"))?;
         let (token_hex, token_bytes) = load_or_create_token(&data_dir.join("operator.token"))?;
@@ -159,6 +192,7 @@ impl ControlPlane {
         Ok(Self {
             data_dir,
             source_repository,
+            evaluator_executable,
             token_hex,
             operator_token,
             run_result_signer,
@@ -286,6 +320,19 @@ impl ControlPlane {
         {
             return Err(ExecuteError::Invalid("genome_id is required"));
         }
+        if let Command::EvaluatePair {
+            evaluation_id,
+            parent_genome_id,
+            candidate_genome_id,
+        } = &command
+            && (evaluation_id.trim().is_empty()
+                || parent_genome_id.trim().is_empty()
+                || candidate_genome_id.trim().is_empty())
+        {
+            return Err(ExecuteError::Invalid(
+                "evaluation and Genome identifiers are required",
+            ));
+        }
 
         match command {
             Command::Status => Ok(self.state.status()),
@@ -328,6 +375,13 @@ impl ControlPlane {
                     maximum_output_bytes,
                     maximum_cost_microusd,
                 )
+            }
+            Command::EvaluatePair {
+                evaluation_id,
+                parent_genome_id,
+                candidate_genome_id,
+            } => {
+                self.run_paired_evaluation(&evaluation_id, &parent_genome_id, &candidate_genome_id)
             }
             Command::Replay => self.replay_response(),
             Command::DaemonStop => {
@@ -474,7 +528,242 @@ impl ControlPlane {
         result
     }
 
-    fn registered_world_cost_ceiling(&self, world_id: &str) -> Result<u64, ExecuteError> {
+    #[allow(clippy::too_many_lines)]
+    fn run_paired_evaluation(
+        &mut self,
+        evaluation_id: &str,
+        parent_genome_id: &str,
+        candidate_genome_id: &str,
+    ) -> Result<ResponseData, ExecuteError> {
+        if parent_genome_id == candidate_genome_id {
+            return Err(ExecuteError::Invalid(
+                "parent and candidate Genomes must differ",
+            ));
+        }
+        let parent = self.runnable_genome(parent_genome_id)?;
+        let candidate = self.runnable_genome(candidate_genome_id)?;
+        if parent.world_id != candidate.world_id {
+            return Err(ExecuteError::Invalid(
+                "paired Genomes must share one registered World",
+            ));
+        }
+        let world = self.registered_world(&parent.world_id)?;
+        let visible = self.world_manifest(&world, "arena.visible_manifest", Visibility::Visible)?;
+        let sealed = self.world_manifest(&world, "arena.sealed_manifest", Visibility::Sealed)?;
+        let evaluator_id = world
+            .evaluator_artifact("arena.evaluator")
+            .ok_or(ExecuteError::Internal)?;
+        let budget = validated_evaluation_budget(
+            PAIRED_EVALUATION_WALL_MILLIS,
+            PAIRED_EVALUATION_OUTPUT_BYTES,
+            0,
+        )?;
+        let budget_receipt = RunBudgetReceipt {
+            wall_millis: PAIRED_EVALUATION_WALL_MILLIS,
+            maximum_output_bytes: PAIRED_EVALUATION_OUTPUT_BYTES,
+            maximum_cost_microusd: 0,
+        };
+        let evaluator_limits = WorkerLimits::new(
+            Duration::from_millis(PAIRED_EVALUATION_WALL_MILLIS),
+            16 * 1024 * 1024,
+            128 * 1024,
+        )
+        .map_err(|_| ExecuteError::Internal)?;
+        let evaluator = self.open_evaluator(evaluator_id, evaluator_limits)?;
+        let environment_id = reference_environment_id();
+        let revision = self.paired_revision(evaluation_id)?;
+        let parent_plan = self.schedule_submission(
+            evaluation_id,
+            "parent",
+            &parent,
+            &visible,
+            &sealed,
+            &revision,
+            &environment_id,
+            budget,
+        )?;
+        let candidate_plan = self.schedule_submission(
+            evaluation_id,
+            "candidate",
+            &candidate,
+            &visible,
+            &sealed,
+            &revision,
+            &environment_id,
+            budget,
+        )?;
+        let binding = EvaluationBinding::new(
+            world.id(),
+            PAIRED_EVALUATION_SEED,
+            &environment_id,
+            evaluator_id,
+            budget_receipt,
+        )
+        .map_err(|_| ExecuteError::Internal)?;
+        let storage = self.storage.take().ok_or(ExecuteError::Internal)?;
+        let result = evaluate_and_record(
+            EvaluationStores {
+                events: storage.ledger,
+                artifacts: storage.artifacts,
+            },
+            ReceiptContext {
+                event_id: format!("arena:evaluation:{evaluation_id}:recorded"),
+                evaluation_id: evaluation_id.to_owned(),
+                caller_id: "control-daemon".to_owned(),
+                timestamp_millis: timestamp_millis().map_err(|_| ExecuteError::Internal)?,
+            },
+            &world,
+            EvaluationInputs {
+                binding: &binding,
+                visible: &visible,
+                sealed: &sealed,
+                parent: &parent_plan,
+                candidate: &candidate_plan,
+                evaluator: &evaluator,
+            },
+        );
+        let Ok(operator) = result else {
+            self.reopen_storage()?;
+            self.refresh_projection()?;
+            return Err(ExecuteError::Internal);
+        };
+        let recorded = operator.candidate_result();
+        let response = ResponseData::Evaluation {
+            evaluation: EvaluationRecord {
+                evaluation_id: recorded.summary.evaluation_id.clone(),
+                world_id: recorded.summary.world_id.clone(),
+                parent_genome_id: recorded.summary.parent_genome_id.clone(),
+                candidate_genome_id: recorded.summary.candidate_genome_id.clone(),
+                parent_visible_correct: recorded.summary.parent_visible_correct,
+                candidate_visible_correct: recorded.summary.candidate_visible_correct,
+                visible_total: recorded.summary.visible_total,
+                event: EvaluationEventRecord {
+                    sequence: recorded.event.sequence,
+                    event_id: recorded.event.event_id.clone(),
+                    aggregate_id: recorded.event.aggregate_id.clone(),
+                    event_type: recorded.event.event_type.clone(),
+                    actor: recorded.event.actor.clone(),
+                    timestamp_millis: recorded.event.timestamp_millis,
+                },
+            },
+        };
+        let stores = operator.into_stores();
+        self.storage = Some(CanonicalStorage {
+            ledger: stores.events,
+            artifacts: stores.artifacts,
+        });
+        self.refresh_projection()?;
+        Ok(response)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn schedule_submission(
+        &mut self,
+        evaluation_id: &str,
+        role: &str,
+        genome: &GenomeRecord,
+        visible: &TrustedManifest,
+        sealed: &TrustedManifest,
+        revision: &str,
+        environment_id: &str,
+        budget: Budget,
+    ) -> Result<TrialPlan, ExecuteError> {
+        let tasks = visible
+            .operator_tasks()
+            .into_iter()
+            .chain(sealed.operator_tasks())
+            .collect::<Vec<_>>();
+        let mut trials = Vec::with_capacity(tasks.len());
+        for (index, task) in tasks.into_iter().enumerate() {
+            let run_id = paired_run_id(evaluation_id, role, index);
+            let event_id = format!("result:{run_id}");
+            if !self.has_event(&event_id)? {
+                self.run_candidate_at_revision(
+                    &run_id,
+                    genome,
+                    &task.task_id,
+                    &task.input,
+                    revision,
+                    environment_id,
+                    budget,
+                )?;
+            }
+            trials.push((task.task_id, event_id));
+        }
+        TrialPlan::new(trials).map_err(|_| ExecuteError::Internal)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_candidate_at_revision(
+        &mut self,
+        run_id: &str,
+        genome: &GenomeRecord,
+        task_id: &str,
+        input: &str,
+        revision: &str,
+        environment_id: &str,
+        budget: Budget,
+    ) -> Result<ResponseData, ExecuteError> {
+        let experiment = ExperimentContext::new(
+            task_id,
+            input.as_bytes(),
+            PAIRED_EVALUATION_SEED,
+            environment_id,
+        )
+        .map_err(|_| ExecuteError::Internal)?;
+        let spec = RunSpec::new_for_experiment_at_revision(
+            run_id,
+            &genome.genome_id,
+            &genome.world_id,
+            &self.source_repository,
+            revision,
+            input,
+            CapabilitySet::new(false, false),
+            budget,
+            experiment,
+        )
+        .map_err(|_| ExecuteError::Internal)?;
+        let manager =
+            SandboxManager::open(self.data_dir.join("sandboxes"), Duration::from_secs(30))
+                .map_err(|_| ExecuteError::Internal)?;
+        let (sandbox, token) = manager.create(&spec).map_err(|_| ExecuteError::Internal)?;
+        let sandbox = SandboxCleanupGuard::new(sandbox);
+        let isolation = candidate_isolation(self.protected_runtime_paths());
+        let runtime = SupervisedRuntime::deterministic(isolation, "/bin/cat", [])
+            .map_err(|_| ExecuteError::Internal)?;
+        let execution = (|| {
+            let limits =
+                RetentionLimits::new(10_000, 65_536).map_err(|_| ExecuteError::Internal)?;
+            let storage = self.storage.take().ok_or(ExecuteError::Internal)?;
+            let recorder = EvidenceRecorder::from_stores(
+                storage.ledger,
+                storage.artifacts,
+                RedactionPolicy::new([self.token_hex.clone()]),
+                limits,
+            );
+            let (execution, recorder) = execute_candidate_runtime(
+                runtime,
+                recorder,
+                &spec,
+                sandbox.sandbox()?,
+                &token,
+                run_id,
+            );
+            let (ledger, artifacts) = recorder.into_stores();
+            let execution = execution.and_then(|output| {
+                persist_reference_output(&artifacts, run_id, genome, spec.source_revision(), output)
+            });
+            self.storage = Some(CanonicalStorage { ledger, artifacts });
+            execution
+        })();
+        sandbox.cleanup()?;
+        let response = execution?;
+        self.append_run_result(&spec, &response)?;
+        self.refresh_projection()?;
+        Ok(response)
+    }
+
+    fn registered_world(&self, world_id: &str) -> Result<CompiledWorld, ExecuteError> {
         let world = self
             .state
             .worlds
@@ -488,9 +777,144 @@ impl ControlPlane {
             .get(&artifact_id)
             .map_err(|_| ExecuteError::Internal)?;
         let source = std::str::from_utf8(&bytes).map_err(|_| ExecuteError::Internal)?;
-        let compiled = compile_world(source, SourceFormat::Json, &storage.artifacts)
+        compile_world(source, SourceFormat::Json, &storage.artifacts)
+            .map_err(|_| ExecuteError::Internal)
+    }
+
+    fn world_manifest(
+        &self,
+        world: &CompiledWorld,
+        name: &str,
+        visibility: Visibility,
+    ) -> Result<TrustedManifest, ExecuteError> {
+        let id = world
+            .evaluator_artifact(name)
+            .ok_or(ExecuteError::Internal)?;
+        let id = ArtifactId::parse(id.to_owned()).map_err(|_| ExecuteError::Internal)?;
+        let bytes = self
+            .storage
+            .as_ref()
+            .ok_or(ExecuteError::Internal)?
+            .artifacts
+            .get(&id)
             .map_err(|_| ExecuteError::Internal)?;
-        Ok(compiled.evaluation_policy().maximum_cost_microusd())
+        TrustedManifest::from_canonical_bytes(&bytes, visibility)
+            .map_err(|_| ExecuteError::Internal)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn open_evaluator(
+        &self,
+        evaluator_id: &str,
+        limits: WorkerLimits,
+    ) -> Result<IsolatedEvaluator, ExecuteError> {
+        let root = self.data_dir.join("evaluator-runs");
+        IsolatedEvaluator::open_with_policy(
+            root,
+            &self.evaluator_executable,
+            evaluator_id,
+            IsolationPolicy::unconfined_for_testing(),
+            limits,
+        )
+        .map_err(|_| ExecuteError::Internal)
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    fn open_evaluator(
+        &self,
+        evaluator_id: &str,
+        limits: WorkerLimits,
+    ) -> Result<IsolatedEvaluator, ExecuteError> {
+        let root = self.data_dir.join("evaluator-runs");
+        IsolatedEvaluator::open(
+            root,
+            &self.evaluator_executable,
+            evaluator_id,
+            self.protected_evaluator_paths(),
+            limits,
+        )
+        .map_err(|_| ExecuteError::Internal)
+    }
+
+    fn protected_runtime_paths(&self) -> Vec<PathBuf> {
+        [
+            "events.sqlite3",
+            "blobs",
+            "operator.token",
+            "runtime-producer.key",
+        ]
+        .into_iter()
+        .map(|name| self.data_dir.join(name))
+        .chain(std::iter::once(self.evaluator_executable.clone()))
+        .collect()
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    fn protected_evaluator_paths(&self) -> Vec<PathBuf> {
+        [
+            "events.sqlite3",
+            "blobs",
+            "operator.token",
+            "runtime-producer.key",
+            "sandboxes",
+        ]
+        .into_iter()
+        .map(|name| self.data_dir.join(name))
+        .chain(std::iter::once(self.source_repository.clone()))
+        .collect()
+    }
+
+    fn paired_revision(&self, evaluation_id: &str) -> Result<String, ExecuteError> {
+        let prefix = paired_run_prefix(evaluation_id);
+        let history = self
+            .storage
+            .as_ref()
+            .ok_or(ExecuteError::Internal)?
+            .ledger
+            .replay_verified()
+            .map_err(|_| ExecuteError::Internal)?;
+        let mut pinned = None;
+        for event in history.iter().filter(|event| {
+            event.event_type == "run.result_recorded"
+                && event.event_id.starts_with(&format!("result:{prefix}-"))
+        }) {
+            let receipt = RunResultReceipt::parse_from_event(event, &self.run_result_verifier)
+                .map_err(|_| ExecuteError::Internal)?;
+            if pinned
+                .as_ref()
+                .is_some_and(|revision| revision != &receipt.source_revision)
+            {
+                return Err(ExecuteError::Internal);
+            }
+            pinned = Some(receipt.source_revision);
+        }
+        pinned.map_or_else(|| resolve_source_revision(&self.source_repository), Ok)
+    }
+
+    fn has_event(&self, event_id: &str) -> Result<bool, ExecuteError> {
+        self.storage
+            .as_ref()
+            .ok_or(ExecuteError::Internal)?
+            .ledger
+            .replay_verified()
+            .map(|history| history.iter().any(|event| event.event_id == event_id))
+            .map_err(|_| ExecuteError::Internal)
+    }
+
+    fn reopen_storage(&mut self) -> Result<(), ExecuteError> {
+        let ledger = EventStore::open(self.data_dir.join("events.sqlite3"))
+            .map_err(|_| ExecuteError::Internal)?;
+        let artifacts =
+            ArtifactStore::open(self.data_dir.join("blobs")).map_err(|_| ExecuteError::Internal)?;
+        self.storage = Some(CanonicalStorage { ledger, artifacts });
+        Ok(())
+    }
+
+    fn registered_world_cost_ceiling(&self, world_id: &str) -> Result<u64, ExecuteError> {
+        Ok(self
+            .registered_world(world_id)?
+            .evaluation_policy()
+            .maximum_cost_microusd())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -694,6 +1118,108 @@ fn execute_reference_runtime(
     })();
     let (_, recorder) = runtime.into_parts();
     (execution, recorder)
+}
+
+fn execute_candidate_runtime(
+    runtime: SupervisedRuntime,
+    recorder: EvidenceRecorder,
+    spec: &RunSpec,
+    sandbox: &Sandbox,
+    token: &CapabilityToken,
+    run_id: &str,
+) -> (Result<ReferenceExecution, ExecuteError>, EvidenceRecorder) {
+    let mut runtime = match RecordedRuntime::new_recoverable(runtime, recorder) {
+        Ok(runtime) => runtime,
+        Err(recovery) => {
+            let (_, _, recorder) = *recovery;
+            return (Err(ExecuteError::Internal), recorder);
+        }
+    };
+    let execution = (|| {
+        runtime
+            .start(spec, sandbox, token)
+            .map_err(|_| ExecuteError::Internal)?;
+        let snapshot = loop {
+            let snapshot = runtime
+                .snapshot(run_id)
+                .map_err(|_| ExecuteError::Internal)?;
+            if snapshot.status != RunStatus::Running {
+                break snapshot;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let completion_reason = snapshot
+            .completion_reason
+            .ok_or(ExecuteError::Internal)
+            .map(run_completion_reason)?;
+        let latency_millis =
+            u64::try_from(snapshot.elapsed.as_millis()).map_err(|_| ExecuteError::Internal)?;
+        let stdout = fs::read(&snapshot.stdout_path).map_err(|_| ExecuteError::Internal)?;
+        let stderr = fs::read(&snapshot.stderr_path).map_err(|_| ExecuteError::Internal)?;
+        let history = runtime
+            .evidence()
+            .replay_verified()
+            .map_err(|_| ExecuteError::Internal)?;
+        Ok(ReferenceExecution {
+            completion_reason,
+            latency_millis,
+            stdout,
+            stderr,
+            trace_artifact_ids: trace_artifacts_for_run(&history, run_id)?,
+        })
+    })();
+    let (_, recorder) = runtime.into_parts();
+    (execution, recorder)
+}
+
+#[cfg(feature = "test-support")]
+fn candidate_isolation(_protected_paths: Vec<PathBuf>) -> IsolationPolicy {
+    IsolationPolicy::unconfined_for_testing()
+}
+
+#[cfg(not(feature = "test-support"))]
+fn candidate_isolation(protected_paths: Vec<PathBuf>) -> IsolationPolicy {
+    IsolationPolicy::detect(protected_paths)
+}
+
+fn paired_run_prefix(evaluation_id: &str) -> String {
+    let digest = blake3::hash(evaluation_id.as_bytes()).to_hex().to_string();
+    format!("paired-{}", &digest[..24])
+}
+
+fn paired_run_id(evaluation_id: &str, role: &str, index: usize) -> String {
+    format!("{}-{role}-{index}", paired_run_prefix(evaluation_id))
+}
+
+fn resolve_source_revision(repository: &Path) -> Result<String, ExecuteError> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(|_| ExecuteError::Internal)?;
+    if !output.status.success() {
+        return Err(ExecuteError::Internal);
+    }
+    let revision = std::str::from_utf8(&output.stdout)
+        .map_err(|_| ExecuteError::Internal)?
+        .trim();
+    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ExecuteError::Internal);
+    }
+    Ok(revision.to_ascii_lowercase())
+}
+
+fn default_evaluator_executable() -> Result<PathBuf, ControlError> {
+    let current = env::current_exe()?;
+    let directory = current
+        .parent()
+        .ok_or(ControlError::Protocol("daemon executable has no directory"))?;
+    Ok(directory.join(format!(
+        "hephaestus-reference-evaluator{}",
+        std::env::consts::EXE_SUFFIX
+    )))
 }
 
 fn persist_reference_output(
@@ -1040,6 +1566,7 @@ fn event_type(command: &Command) -> &'static str {
         Command::GenomeShow { .. } => "control.genome_show",
         Command::RunReference { .. } => "control.run_reference",
         Command::RunEvaluation { .. } => "control.run_evaluation",
+        Command::EvaluatePair { .. } => "control.evaluate_pair",
         Command::Replay => "control.replay",
         Command::DaemonStop => "control.daemon_stop",
     }

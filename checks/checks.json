@@ -3,7 +3,7 @@
   "mutation_test_commands": {
     "checks/": "env PYTHONPATH=python python3 -m unittest python.tests.test_mutation_guard -v",
     "crates/hephaestus-arena/": "cargo test -p hephaestus-arena --all-features --quiet",
-    "crates/hephaestus-control/": "cargo test -p hephaestus-control --quiet",
+    "crates/hephaestus-control/": "cargo test -p hephaestus-control --all-features --quiet",
     "crates/hephaestus-core/": "cargo test -p hephaestus-core --quiet",
     "crates/hephaestus-experience/": "cargo test -p hephaestus-experience --quiet",
     "crates/hephaestus-genome/": "cargo test -p hephaestus-genome --quiet",
@@ -1255,6 +1255,48 @@
       "invariant": "The trusted scheduling view exposes task inputs but never evaluator expectations.",
       "find": "            .map(|task| OperatorTask {\n                task_id: task.task_id.clone(),\n                input: task.input.clone(),\n            })",
       "replace": "            .map(|task| OperatorTask {\n                task_id: task.task_id.clone(),\n                input: task.expected_output.clone(),\n            })"
+    },
+    {
+      "id": "control-self-pair-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A Genome cannot serve as both sides of a claimed parent-versus-candidate comparison.",
+      "find": "        if parent_genome_id == candidate_genome_id {",
+      "replace": "        if false && parent_genome_id == candidate_genome_id {"
+    },
+    {
+      "id": "control-world-bound-evaluator-bypassed",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The daemon verifies the exact World-bound evaluator executable before candidate scheduling.",
+      "find": "        let evaluator = self.open_evaluator(evaluator_id, evaluator_limits)?;",
+      "replace": "        let evaluator = IsolatedEvaluator::in_process_for_testing(evaluator_id)\n            .map_err(|_| ExecuteError::Internal)?;"
+    },
+    {
+      "id": "control-sealed-tasks-not-scheduled",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The trusted scheduler runs every sealed task without exposing its expectation.",
+      "find": "            .chain(sealed.operator_tasks())",
+      "replace": "            .chain(Vec::new())"
+    },
+    {
+      "id": "control-paired-retry-reruns-candidates",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A retried paired evaluation reuses authenticated deterministic run events instead of duplicating candidate work.",
+      "find": "            if !self.has_event(&event_id)? {",
+      "replace": "            if true {"
+    },
+    {
+      "id": "control-paired-seed-diverges",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Every candidate trial uses the same daemon-owned seed committed by the paired evaluation binding.",
+      "find": "        let experiment = ExperimentContext::new(\n            task_id,\n            input.as_bytes(),\n            PAIRED_EVALUATION_SEED,",
+      "replace": "        let experiment = ExperimentContext::new(\n            task_id,\n            input.as_bytes(),\n            0,"
+    },
+    {
+      "id": "control-candidate-process-not-supervised",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Paired candidate trials execute through the supervised offline process adapter.",
+      "find": "        let runtime = SupervisedRuntime::deterministic(isolation, \"/bin/cat\", [])",
+      "replace": "        let runtime = SupervisedRuntime::deterministic(isolation, \"/usr/bin/true\", [])"
     }
   ]
 }

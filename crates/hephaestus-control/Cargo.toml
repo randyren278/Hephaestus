@@ -6,10 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+test-support = ["hephaestus-arena/test-support", "hephaestus-runtime/test-support"]
+
 [dependencies]
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+hephaestus-arena = { path = "../hephaestus-arena" }
 hephaestus-core = { path = "../hephaestus-core" }
 hephaestus-experience = { path = "../hephaestus-experience" }
 hephaestus-genome = { path = "../hephaestus-genome" }
@@ -20,6 +24,7 @@ serde_json = "1"
 
 [dev-dependencies]
 hephaestus-arena = { path = "../hephaestus-arena", features = ["test-support"] }
+hephaestus-runtime = { path = "../hephaestus-runtime", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

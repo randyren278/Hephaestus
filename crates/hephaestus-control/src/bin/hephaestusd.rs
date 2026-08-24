@@ -12,6 +12,9 @@ struct Arguments {
     /// Git repository materialized into isolated reference-run worktrees.
     #[arg(long)]
     source_repository: Option<PathBuf>,
+    /// Exact World-bound evaluator executable deployed beside the daemon by default.
+    #[arg(long)]
+    evaluator_executable: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -36,9 +39,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match ControlPlane::open_with_repository(data_dir, source_repository)
-        .and_then(ControlPlane::serve)
-    {
+    let opened = match arguments.evaluator_executable {
+        Some(evaluator) => {
+            ControlPlane::open_with_repository_and_evaluator(data_dir, source_repository, evaluator)
+        }
+        None => ControlPlane::open_with_repository(data_dir, source_repository),
+    };
+    match opened.and_then(ControlPlane::serve) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("hephaestusd: {error}");

@@ -43,6 +43,13 @@ flowchart TD
     Manifests -->|operator task view without expectations| Daemon
     Manifests --> Arena
     Runtime --> Sandbox[Pinned private Git worktree]
+    Daemon --> Pair[Trusted paired scheduler]
+    Pair --> Parent[Supervised parent process]
+    Pair --> CandidateRun[Supervised candidate process]
+    Parent --> Arena
+    CandidateRun --> Arena
+    Pair --> Evaluator[World-hashed isolated evaluator]
+    Evaluator --> Arena
     Sandbox --> Codex[Codex driver]
     Sandbox --> Claude[Claude driver]
     Sandbox --> Reference[Offline reference runtime]

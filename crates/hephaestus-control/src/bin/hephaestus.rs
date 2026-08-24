@@ -1,7 +1,9 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use hephaestus_control::{ApiResponse, Client, Command, ResponseData, data_dir_from_environment};
+use hephaestus_control::{
+    ApiResponse, Client, Command, EvaluationRecord, ResponseData, data_dir_from_environment,
+};
 
 #[derive(Parser)]
 #[command(name = "hephaestus", about = "Hephaestus operator CLI")]
@@ -56,6 +58,11 @@ enum CliCommand {
         #[arg(long, default_value_t = 0)]
         maximum_cost_microusd: u64,
     },
+    /// Run trusted paired evaluations.
+    Arena {
+        #[command(subcommand)]
+        command: ArenaCommand,
+    },
     /// Verify and replay the canonical event stream.
     Replay,
     /// Control the local daemon process.
@@ -71,6 +78,19 @@ enum GenomeCommand {
     Show {
         /// Content-derived Genome identity.
         genome_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArenaCommand {
+    /// Compare a parent and candidate using daemon-owned World tasks and budgets.
+    Evaluate {
+        /// Stable caller-selected evaluation identity.
+        evaluation_id: String,
+        /// Content-derived registered parent Genome identity.
+        parent_genome_id: String,
+        /// Content-derived registered candidate Genome identity.
+        candidate_genome_id: String,
     },
 }
 
@@ -92,40 +112,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let command = match arguments.command {
-        CliCommand::Status => Command::Status,
-        CliCommand::Freeze => Command::Freeze,
-        CliCommand::Unfreeze => Command::Unfreeze,
-        CliCommand::Kill { all: true } => Command::KillAll,
-        CliCommand::Kill { all: false } => {
-            eprintln!("hephaestus: kill requires --all");
+    let command = match command_from_cli(arguments.command) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("hephaestus: {message}");
             return ExitCode::FAILURE;
         }
-        CliCommand::Genome {
-            command: GenomeCommand::Show { genome_id },
-        } => Command::GenomeShow { genome_id },
-        CliCommand::Run { genome_id } => Command::RunReference { genome_id },
-        CliCommand::Evaluate {
-            genome_id,
-            task_id,
-            input,
-            seed,
-            wall_millis,
-            maximum_output_bytes,
-            maximum_cost_microusd,
-        } => Command::RunEvaluation {
-            genome_id,
-            task_id,
-            input,
-            seed,
-            wall_millis,
-            maximum_output_bytes,
-            maximum_cost_microusd,
-        },
-        CliCommand::Replay => Command::Replay,
-        CliCommand::Daemon {
-            command: DaemonCommand::Stop,
-        } => Command::DaemonStop,
     };
     let response = match Client::new(data_dir).request(command) {
         Ok(response) => response,
@@ -147,6 +139,53 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn command_from_cli(command: CliCommand) -> Result<Command, &'static str> {
+    Ok(match command {
+        CliCommand::Status => Command::Status,
+        CliCommand::Freeze => Command::Freeze,
+        CliCommand::Unfreeze => Command::Unfreeze,
+        CliCommand::Kill { all: true } => Command::KillAll,
+        CliCommand::Kill { all: false } => return Err("kill requires --all"),
+        CliCommand::Genome {
+            command: GenomeCommand::Show { genome_id },
+        } => Command::GenomeShow { genome_id },
+        CliCommand::Run { genome_id } => Command::RunReference { genome_id },
+        CliCommand::Evaluate {
+            genome_id,
+            task_id,
+            input,
+            seed,
+            wall_millis,
+            maximum_output_bytes,
+            maximum_cost_microusd,
+        } => Command::RunEvaluation {
+            genome_id,
+            task_id,
+            input,
+            seed,
+            wall_millis,
+            maximum_output_bytes,
+            maximum_cost_microusd,
+        },
+        CliCommand::Arena {
+            command:
+                ArenaCommand::Evaluate {
+                    evaluation_id,
+                    parent_genome_id,
+                    candidate_genome_id,
+                },
+        } => Command::EvaluatePair {
+            evaluation_id,
+            parent_genome_id,
+            candidate_genome_id,
+        },
+        CliCommand::Replay => Command::Replay,
+        CliCommand::Daemon {
+            command: DaemonCommand::Stop,
+        } => Command::DaemonStop,
+    })
 }
 
 fn print_human(response: &ApiResponse) {
@@ -195,6 +234,9 @@ fn print_human(response: &ApiResponse) {
             "run={run_id} genome={genome_id} world={world_id} revision={source_revision} reason={completion_reason:?} latency_ms={latency_millis} cost_microusd={actual_cost_microusd} stdout={stdout_artifact_id} stderr={stderr_artifact_id} traces={}",
             trace_artifact_ids.join(",")
         ),
+        (Some(ResponseData::Evaluation { evaluation }), None) => {
+            println!("{}", evaluation_human(evaluation));
+        }
         (
             Some(ResponseData::Replay {
                 event_count,
@@ -208,5 +250,78 @@ fn print_human(response: &ApiResponse) {
         ),
         (_, Some(error)) => eprintln!("{:?}: {}", error.code, error.message),
         _ => eprintln!("invalid daemon response"),
+    }
+}
+
+fn evaluation_human(evaluation: &EvaluationRecord) -> String {
+    format!(
+        "evaluation={} parent={} candidate={} world={} candidate_visible={}/{} parent_visible={}/{} event={} sequence={} aggregate={}",
+        evaluation.evaluation_id,
+        evaluation.parent_genome_id,
+        evaluation.candidate_genome_id,
+        evaluation.world_id,
+        evaluation.candidate_visible_correct,
+        evaluation.visible_total,
+        evaluation.parent_visible_correct,
+        evaluation.visible_total,
+        evaluation.event.event_id,
+        evaluation.event.sequence,
+        evaluation.event.aggregate_id
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Arguments, command_from_cli, evaluation_human};
+    use hephaestus_control::{Command, EvaluationEventRecord, EvaluationRecord};
+
+    #[test]
+    fn arena_evaluate_maps_positional_identifiers_to_paired_command() {
+        let arguments = Arguments::try_parse_from([
+            "hephaestus",
+            "arena",
+            "evaluate",
+            "evaluation-1",
+            "parent-1",
+            "candidate-1",
+        ])
+        .expect("CLI parses");
+
+        assert_eq!(
+            command_from_cli(arguments.command).expect("command maps"),
+            Command::EvaluatePair {
+                evaluation_id: "evaluation-1".to_owned(),
+                parent_genome_id: "parent-1".to_owned(),
+                candidate_genome_id: "candidate-1".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn evaluation_human_output_is_aggregate_only() {
+        let evaluation = EvaluationRecord {
+            evaluation_id: "evaluation-1".to_owned(),
+            world_id: "world-1".to_owned(),
+            parent_genome_id: "parent-1".to_owned(),
+            candidate_genome_id: "candidate-1".to_owned(),
+            parent_visible_correct: 2,
+            candidate_visible_correct: 3,
+            visible_total: 4,
+            event: EvaluationEventRecord {
+                sequence: 9,
+                event_id: "evaluation:evaluation-1:recorded".to_owned(),
+                aggregate_id: "evaluation:evaluation-1".to_owned(),
+                event_type: "evaluation.recorded".to_owned(),
+                actor: "arena-plane".to_owned(),
+                timestamp_millis: 1_234,
+            },
+        };
+
+        assert_eq!(
+            evaluation_human(&evaluation),
+            "evaluation=evaluation-1 parent=parent-1 candidate=candidate-1 world=world-1 candidate_visible=3/4 parent_visible=2/4 event=evaluation:evaluation-1:recorded sequence=9 aggregate=evaluation:evaluation-1"
+        );
     }
 }

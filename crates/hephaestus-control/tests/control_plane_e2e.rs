@@ -26,6 +26,7 @@ use tempfile::tempdir;
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_hephaestusd");
 const CLI: &str = env!("CARGO_BIN_EXE_hephaestus");
+const REFERENCE_EVALUATOR: &str = env!("CARGO_BIN_EXE_hephaestus-reference-evaluator");
 
 fn runtime_environment_id() -> String {
     format!(
@@ -48,11 +49,18 @@ impl Daemon {
     }
 
     fn start_with_repository(data_dir: &Path, source_repository: &Path) -> Self {
+        fs::create_dir_all(data_dir).expect("create daemon data directory");
+        let evaluator = data_dir.join("reference-evaluator");
+        fs::copy(REFERENCE_EVALUATOR, &evaluator).expect("copy evaluator executable");
+        fs::set_permissions(&evaluator, fs::Permissions::from_mode(0o700))
+            .expect("protect evaluator executable");
         let mut child = ProcessCommand::new(DAEMON)
             .arg("--data-dir")
             .arg(data_dir)
             .arg("--source-repository")
             .arg(source_repository)
+            .arg("--evaluator-executable")
+            .arg(evaluator)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -135,7 +143,9 @@ fn daemon_evaluation_results_replay_and_feed_exact_authenticated_arena_events() 
     let sealed_id = artifacts
         .put(&serde_json::to_vec(&sealed).unwrap())
         .unwrap();
-    let evaluator_id = artifacts.put(b"exact-match-evaluator-v1").unwrap();
+    let evaluator_id = artifacts
+        .put(&fs::read(REFERENCE_EVALUATOR).unwrap())
+        .unwrap();
     let verifier_id = artifacts
         .put(&signer.verifier().public_key_bytes())
         .unwrap();
@@ -236,6 +246,153 @@ fn daemon_evaluation_results_replay_and_feed_exact_authenticated_arena_events() 
     );
     let sandbox_root = data_dir.join("sandboxes");
     assert!(!sandbox_root.exists() || fs::read_dir(sandbox_root).unwrap().next().is_none());
+    #[cfg(feature = "test-support")]
+    {
+        let first = response(&cli(
+            &data_dir,
+            &[
+                "arena",
+                "evaluate",
+                "daemon-owned-pair",
+                &parent.genome_id,
+                &candidate.genome_id,
+            ],
+        ));
+        let first_evaluation = match first.data.unwrap() {
+            ResponseData::Evaluation { evaluation } => evaluation,
+            other => panic!("unexpected paired evaluation response: {other:?}"),
+        };
+        assert_eq!(first_evaluation.parent_visible_correct, 0);
+        assert_eq!(first_evaluation.candidate_visible_correct, 0);
+        assert_eq!(first_evaluation.visible_total, 1);
+        let same_genome = cli(
+            &data_dir,
+            &[
+                "arena",
+                "evaluate",
+                "invalid-self-pair",
+                &parent.genome_id,
+                &parent.genome_id,
+            ],
+        );
+        assert!(!same_genome.status.success());
+        assert_eq!(
+            serde_json::from_slice::<ApiResponse>(&same_genome.stdout)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            ApiErrorCode::InvalidRequest
+        );
+        let before_retry = EventStore::open(data_dir.join("events.sqlite3"))
+            .unwrap()
+            .replay_verified()
+            .unwrap();
+        let paired_receipts = before_retry
+            .iter()
+            .filter(|event| event.event_id.starts_with("result:paired-"))
+            .map(|event| RunResultReceipt::parse_from_event(event, &signer.verifier()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(paired_receipts.len(), 4);
+        assert_eq!(
+            paired_receipts
+                .iter()
+                .map(|receipt| receipt.source_revision.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "every paired trial must use one pinned source revision"
+        );
+        for receipt in &paired_receipts {
+            let expected = match receipt.task_id.as_str() {
+                "visible-task" => b"visible input".as_slice(),
+                "sealed-task" => b"sealed input".as_slice(),
+                other => panic!("unexpected daemon-owned task: {other}"),
+            };
+            assert_eq!(
+                artifacts
+                    .get(
+                        &hephaestus_ledger::ArtifactId::parse(receipt.stdout_artifact_id.clone())
+                            .unwrap()
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+        let retried = response(&cli(
+            &data_dir,
+            &[
+                "arena",
+                "evaluate",
+                "daemon-owned-pair",
+                &parent.genome_id,
+                &candidate.genome_id,
+            ],
+        ));
+        assert_eq!(
+            retried.data,
+            Some(ResponseData::Evaluation {
+                evaluation: first_evaluation,
+            })
+        );
+        let after_retry = EventStore::open(data_dir.join("events.sqlite3"))
+            .unwrap()
+            .replay_verified()
+            .unwrap();
+        for event_type in ["run.result_recorded", "evaluation.recorded"] {
+            assert_eq!(
+                before_retry
+                    .iter()
+                    .filter(|event| event.event_type == event_type)
+                    .count(),
+                after_retry
+                    .iter()
+                    .filter(|event| event.event_type == event_type)
+                    .count(),
+                "retry duplicated {event_type}"
+            );
+        }
+        for root in [data_dir.join("sandboxes"), data_dir.join("evaluator-runs")] {
+            assert!(
+                !root.exists() || fs::read_dir(&root).unwrap().next().is_none(),
+                "paired evaluation left private execution state in {}",
+                root.display()
+            );
+        }
+        let deployed_evaluator = data_dir.join("reference-evaluator");
+        fs::write(&deployed_evaluator, b"tampered evaluator").unwrap();
+        let rejected_output = cli(
+            &data_dir,
+            &[
+                "arena",
+                "evaluate",
+                "tampered-evaluator-pair",
+                &parent.genome_id,
+                &candidate.genome_id,
+            ],
+        );
+        assert!(!rejected_output.status.success());
+        let rejected = serde_json::from_slice::<ApiResponse>(&rejected_output.stdout).unwrap();
+        assert_eq!(rejected.error.unwrap().code, ApiErrorCode::Internal);
+        let after_rejection = EventStore::open(data_dir.join("events.sqlite3"))
+            .unwrap()
+            .replay_verified()
+            .unwrap();
+        assert_eq!(
+            after_retry
+                .iter()
+                .filter(|event| event.event_type == "run.result_recorded")
+                .count(),
+            after_rejection
+                .iter()
+                .filter(|event| event.event_type == "run.result_recorded")
+                .count(),
+            "an untrusted evaluator must fail before candidate scheduling"
+        );
+        fs::write(&deployed_evaluator, fs::read(REFERENCE_EVALUATOR).unwrap()).unwrap();
+        fs::set_permissions(&deployed_evaluator, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(cli(&data_dir, &["replay"]).status.success());
+    }
     let mut parent_trials = Vec::new();
     let mut candidate_trials = Vec::new();
     for (task, input) in [
@@ -773,6 +930,31 @@ fn local_api_fails_closed_for_bad_auth_versions_and_requests() {
         invalid_identifier.error.expect("identifier error").code,
         ApiErrorCode::InvalidRequest
     );
+    let token = fs::read_to_string(directory.path().join("operator.token")).expect("read token");
+    for (index, evaluation_id, parent_genome_id, candidate_genome_id) in [
+        (0, " ", "parent", "candidate"),
+        (1, "evaluation", " ", "candidate"),
+        (2, "evaluation", "parent", " "),
+    ] {
+        let invalid_pair = raw_request(
+            &socket,
+            &serde_json::to_vec(&ApiRequest {
+                version: API_VERSION,
+                request_id: format!("invalid-pair-{index}"),
+                token: token.clone(),
+                command: Command::EvaluatePair {
+                    evaluation_id: evaluation_id.to_owned(),
+                    parent_genome_id: parent_genome_id.to_owned(),
+                    candidate_genome_id: candidate_genome_id.to_owned(),
+                },
+            })
+            .expect("encode invalid pair"),
+        );
+        assert_eq!(
+            invalid_pair.error.expect("pair identifier error").code,
+            ApiErrorCode::InvalidRequest
+        );
+    }
 
     let status = cli(directory.path(), &["status"]);
     assert!(matches!(

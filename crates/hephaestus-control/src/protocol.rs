@@ -57,6 +57,15 @@ pub enum Command {
         /// Maximum provider spend in micro-US dollars.
         maximum_cost_microusd: u64,
     },
+    /// Run one trusted parent-versus-candidate evaluation from daemon-owned inputs.
+    EvaluatePair {
+        /// Stable caller-selected evaluation identity.
+        evaluation_id: String,
+        /// Immutable registered parent Genome identity.
+        parent_genome_id: String,
+        /// Immutable registered candidate Genome identity.
+        candidate_genome_id: String,
+    },
     /// Verify and replay canonical history into a fresh projection.
     Replay,
     /// Stop the local daemon after acknowledging the audited request.
@@ -156,6 +165,11 @@ pub enum ResponseData {
         /// CAS addresses of the redacted trace artifacts.
         trace_artifact_ids: Vec<String>,
     },
+    /// Candidate-safe aggregate result from a trusted paired evaluation.
+    Evaluation {
+        /// Visible summary and payload-free canonical event metadata.
+        evaluation: EvaluationRecord,
+    },
     /// Result of a fresh verified replay.
     Replay {
         /// Number of verified canonical events.
@@ -167,6 +181,46 @@ pub enum ResponseData {
         /// Stable BLAKE3 hash of the reconstructed projection.
         projection_hash: String,
     },
+}
+
+/// Candidate-safe visible aggregate and ledger metadata for one evaluation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationRecord {
+    /// Stable evaluation identity.
+    pub evaluation_id: String,
+    /// Exact immutable World identity shared by both Genomes.
+    pub world_id: String,
+    /// Immutable parent Genome identity.
+    pub parent_genome_id: String,
+    /// Immutable candidate Genome identity.
+    pub candidate_genome_id: String,
+    /// Parent correct answers on candidate-visible tasks.
+    pub parent_visible_correct: u32,
+    /// Candidate correct answers on candidate-visible tasks.
+    pub candidate_visible_correct: u32,
+    /// Number of candidate-visible tasks.
+    pub visible_total: u32,
+    /// Payload-free canonical event metadata.
+    pub event: EvaluationEventRecord,
+}
+
+/// Payload-free canonical ledger metadata for an evaluation receipt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationEventRecord {
+    /// Canonical global ledger sequence.
+    pub sequence: u64,
+    /// Deterministic event identity.
+    pub event_id: String,
+    /// Deterministic evaluation aggregate identity.
+    pub aggregate_id: String,
+    /// Stable event type.
+    pub event_type: String,
+    /// Fixed trusted actor.
+    pub actor: String,
+    /// Caller-observed Unix timestamp in milliseconds.
+    pub timestamp_millis: i64,
 }
 
 /// Stable public metadata for an immutable Genome ledger record.
@@ -221,4 +275,112 @@ pub enum ApiErrorCode {
     NotFound,
     /// Canonical persistence or projection verification failed.
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        API_VERSION, ApiRequest, ApiResponse, Command, EvaluationEventRecord, EvaluationRecord,
+        ResponseData,
+    };
+
+    #[test]
+    fn paired_evaluation_command_has_a_stable_wire_shape() {
+        let request = ApiRequest {
+            version: API_VERSION,
+            request_id: "request-1".to_owned(),
+            token: "secret".to_owned(),
+            command: Command::EvaluatePair {
+                evaluation_id: "evaluation-1".to_owned(),
+                parent_genome_id: "parent-1".to_owned(),
+                candidate_genome_id: "candidate-1".to_owned(),
+            },
+        };
+
+        let encoded = serde_json::to_value(&request).expect("request serializes");
+        assert_eq!(
+            encoded["command"],
+            serde_json::json!({
+                "command": "evaluate_pair",
+                "evaluation_id": "evaluation-1",
+                "parent_genome_id": "parent-1",
+                "candidate_genome_id": "candidate-1"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ApiRequest>(encoded).expect("request deserializes"),
+            request
+        );
+    }
+
+    #[test]
+    fn evaluation_response_contains_only_visible_aggregates_and_event_metadata() {
+        let response = ApiResponse::success(
+            "request-1".to_owned(),
+            ResponseData::Evaluation {
+                evaluation: EvaluationRecord {
+                    evaluation_id: "evaluation-1".to_owned(),
+                    world_id: "world-1".to_owned(),
+                    parent_genome_id: "parent-1".to_owned(),
+                    candidate_genome_id: "candidate-1".to_owned(),
+                    parent_visible_correct: 2,
+                    candidate_visible_correct: 3,
+                    visible_total: 4,
+                    event: EvaluationEventRecord {
+                        sequence: 9,
+                        event_id: "evaluation:evaluation-1:recorded".to_owned(),
+                        aggregate_id: "evaluation:evaluation-1".to_owned(),
+                        event_type: "evaluation.recorded".to_owned(),
+                        actor: "arena-plane".to_owned(),
+                        timestamp_millis: 1_234,
+                    },
+                },
+            },
+        );
+
+        let encoded = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(encoded["data"]["type"], "evaluation");
+        assert_eq!(encoded["data"]["evaluation"]["visible_total"], 4);
+        assert_eq!(encoded["data"]["evaluation"]["event"]["sequence"], 9);
+        let text = serde_json::to_string(&encoded).expect("JSON value serializes");
+        assert!(!text.contains("sealed"));
+        assert!(!text.contains("expected_output"));
+        assert!(!text.contains("artifact_id"));
+        assert_eq!(
+            serde_json::from_value::<ApiResponse>(encoded).expect("response deserializes"),
+            response
+        );
+    }
+
+    #[test]
+    fn evaluation_response_rejects_unknown_evidence_fields() {
+        let value = serde_json::json!({
+            "version": API_VERSION,
+            "request_id": "request-1",
+            "data": {
+                "type": "evaluation",
+                "evaluation": {
+                    "evaluation_id": "evaluation-1",
+                    "world_id": "world-1",
+                    "parent_genome_id": "parent-1",
+                    "candidate_genome_id": "candidate-1",
+                    "parent_visible_correct": 2,
+                    "candidate_visible_correct": 3,
+                    "visible_total": 4,
+                    "sealed_total": 5,
+                    "event": {
+                        "sequence": 9,
+                        "event_id": "evaluation:evaluation-1:recorded",
+                        "aggregate_id": "evaluation:evaluation-1",
+                        "event_type": "evaluation.recorded",
+                        "actor": "arena-plane",
+                        "timestamp_millis": 1234
+                    }
+                }
+            },
+            "error": null
+        });
+
+        assert!(serde_json::from_value::<ApiResponse>(value).is_err());
+    }
 }
