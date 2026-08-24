@@ -343,8 +343,8 @@
       "id": "reference-runtime-workspace-authority-widened",
       "file": "crates/hephaestus-control/src/server.rs",
       "invariant": "The offline reference runtime receives read-only and offline authority regardless of Genome ceiling.",
-      "find": "            CapabilitySet::new(false, false),",
-      "replace": "            CapabilitySet::new(true, false),"
+      "find": "            prompt,\n            CapabilitySet::new(false, false),\n            budget,",
+      "replace": "            prompt,\n            CapabilitySet::new(true, false),\n            budget,"
     },
     {
       "id": "trace-completion-projection-ignored",

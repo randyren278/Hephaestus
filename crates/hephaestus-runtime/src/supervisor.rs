@@ -506,7 +506,7 @@ fn status_from_exit(status: ExitStatus) -> RunStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, os::unix::fs::PermissionsExt, process::Command, thread, time::Duration};
+    use std::{fs, io, process::Command, thread, time::Duration};
 
     use hephaestus_core::authority::CapabilitySet;
     use tempfile::{TempDir, tempdir};
@@ -788,10 +788,14 @@ mod tests {
             b"#!/bin/sh\n/bin/sleep 4 &\necho $! > \"$1\"\nwait\n",
         )
         .expect("write process fixture");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
-            .expect("make process fixture executable");
         let child_pid_path = sandbox.execution_dir().join("child.pid");
-        let mut runtime = test_runtime(&script, [child_pid_path.display().to_string()]);
+        let mut runtime = test_runtime(
+            "/bin/sh",
+            [
+                script.display().to_string(),
+                child_pid_path.display().to_string(),
+            ],
+        );
         runtime
             .start(&run_spec, &sandbox, &token)
             .expect("start process group");
