@@ -68,7 +68,7 @@ The authority, domain, compiler, Genome, World, event-store, artifact-store, run
 - `crates/hephaestus-core/` — shared trust primitives.
 - `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
 - `crates/hephaestus-arena/` — World-bound deterministic paired measurement, strict manifest rehydration, operator-safe task scheduling, authenticated terminal metrics, sealed receipts, and restart-safe event-bound selection evidence.
-- `crates/hephaestus-experience/` — redacted traces, runtime evidence integration, and provenance-backed experience.
+- `crates/hephaestus-experience/` — redacted traces, runtime evidence integration, and restart-safe trusted Experience rehydration with recursive provenance checks.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.
 - `crates/hephaestus-runtime/` — capability-scoped worktrees and runtime adapters.

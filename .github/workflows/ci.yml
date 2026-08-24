@@ -111,7 +111,7 @@ jobs:
             timeout_minutes: 30
           - scope: hephaestus-experience
             prefix: crates/hephaestus-experience/
-            minimum: 44
+            minimum: 67
             timeout_minutes: 20
           - scope: mutation-checks
             prefix: checks/

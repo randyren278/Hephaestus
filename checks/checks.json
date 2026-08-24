@@ -31,6 +31,7 @@
     "crates/hephaestus-experience/src/record.rs",
     "crates/hephaestus-experience/src/recorder.rs",
     "crates/hephaestus-experience/src/redaction.rs",
+    "crates/hephaestus-experience/src/rehydrate.rs",
     "crates/hephaestus-genome/src/compiler.rs",
     "crates/hephaestus-genome/src/genome.rs",
     "crates/hephaestus-genome/src/world.rs",
@@ -1367,6 +1368,167 @@
       "invariant": "Restart rehydration verifies every transitive run output, diagnostic, and trace artifact.",
       "find": "            verify_operator_artifact(artifacts, referenced)?;",
       "replace": ""
+    },
+    {
+      "id": "experience-rehydration-noncanonical-receipt-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Trusted Experience rehydration accepts only the exact canonical receipt bytes committed by the event.",
+      "find": "    let receipt: ExperienceReceipt = serde_json::from_slice(&event.payload)?;\n    if serde_json::to_vec(&receipt)? != event.payload {",
+      "replace": "    let receipt: ExperienceReceipt = serde_json::from_slice(&event.payload)?;\n    if false && serde_json::to_vec(&receipt)? != event.payload {"
+    },
+    {
+      "id": "experience-rehydration-metadata-bypassed",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A deserialized Experience receipt satisfies its schema, status, identity, provenance, source, confidence, and event-envelope rules.",
+      "find": "    validate_experience_metadata(event, &receipt)?;",
+      "replace": ""
+    },
+    {
+      "id": "duplicate-experience-input-source-accepted",
+      "file": "crates/hephaestus-experience/src/record.rs",
+      "invariant": "A newly recorded Experience cannot repeat a source event identity.",
+      "find": "        if source_event_ids.iter().collect::<BTreeSet<_>>().len() != source_event_ids.len() {\n            return Err(ExperienceError::InvalidInput(\n                \"experience source events must be distinct\",\n            ));\n        }",
+      "replace": ""
+    },
+    {
+      "id": "duplicate-rehydrated-experience-source-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A stored Experience cannot repeat a source event identity to amplify validation or fabricate source cardinality.",
+      "find": "        || receipt\n            .source_event_ids\n            .iter()\n            .collect::<BTreeSet<_>>()\n            .len()\n            != receipt.source_event_ids.len()",
+      "replace": ""
+    },
+    {
+      "id": "experience-rehydration-noncanonical-artifact-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Trusted Experience artifacts must be byte-exact canonical JSON.",
+      "find": "    if serde_json::to_vec(&value)? != bytes {",
+      "replace": "    if false && serde_json::to_vec(&value)? != bytes {"
+    },
+    {
+      "id": "experience-rehydration-artifact-binding-bypassed",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "The primary Experience artifact exactly matches every receipt claim and the event timestamp.",
+      "find": "    validate_experience_artifact(event, &receipt, &artifact)?;",
+      "replace": ""
+    },
+    {
+      "id": "experience-rehydration-unknown-source-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Every rehydrated Experience source resolves by its exact event identity.",
+      "find": "            let source = history\n                .get(source_id.as_str())\n                .copied()",
+      "replace": "            let source = history\n                .values()\n                .next()\n                .copied()"
+    },
+    {
+      "id": "experience-rehydration-forward-source-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Every Experience source precedes the derived Experience in canonical ledger order.",
+      "find": "        if source.sequence >= event.sequence {",
+      "replace": "        if false && source.sequence >= event.sequence {"
+    },
+    {
+      "id": "experience-trace-source-noncanonical-receipt-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience must use exact canonical receipt bytes.",
+      "find": "    if serde_json::to_vec(&receipt)? != event.payload {\n        return Err(ExperienceError::InvalidStoredExperience(\n            \"source receipt is not canonical JSON\",\n        ));\n    }",
+      "replace": ""
+    },
+    {
+      "id": "experience-trace-source-invalid-provenance-accepted",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience has bounded nonblank run, Genome, and World provenance.",
+      "find": "        ));\n    }\n    receipt.provenance.validate()?;\n    if receipt.schema_version != 1",
+      "replace": "        ));\n    }\n    if receipt.schema_version != 1"
+    },
+    {
+      "id": "experience-trace-source-schema-unchecked",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience uses the supported receipt schema.",
+      "find": "    if receipt.schema_version != 1\n        || event.event_id != receipt.event_id",
+      "replace": "    if false && receipt.schema_version != 1\n        || event.event_id != receipt.event_id"
+    },
+    {
+      "id": "experience-trace-source-identity-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience is bound to its exact event identity.",
+      "find": "        || event.event_id != receipt.event_id",
+      "replace": "        || false && event.event_id != receipt.event_id"
+    },
+    {
+      "id": "experience-trace-source-aggregate-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience is bound to its provenance run aggregate.",
+      "find": "        || event.aggregate_id != format!(\"run:{}\", receipt.provenance.run_id())",
+      "replace": "        || false && event.aggregate_id != format!(\"run:{}\", receipt.provenance.run_id())"
+    },
+    {
+      "id": "experience-trace-source-actor-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience is bound to the recorder actor convention.",
+      "find": "        || event.aggregate_id != format!(\"run:{}\", receipt.provenance.run_id())\n        || event.actor != EXPERIENCE_ACTOR",
+      "replace": "        || event.aggregate_id != format!(\"run:{}\", receipt.provenance.run_id())\n        || false && event.actor != EXPERIENCE_ACTOR"
+    },
+    {
+      "id": "experience-trace-source-artifact-schema-unchecked",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience uses the supported artifact schema.",
+      "find": "    if artifact.schema_version != 1\n        || artifact.event_id != receipt.event_id",
+      "replace": "    if false && artifact.schema_version != 1\n        || artifact.event_id != receipt.event_id"
+    },
+    {
+      "id": "experience-trace-source-artifact-identity-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience artifact is bound to the receipt event identity.",
+      "find": "        || artifact.event_id != receipt.event_id",
+      "replace": "        || false && artifact.event_id != receipt.event_id"
+    },
+    {
+      "id": "experience-trace-source-artifact-provenance-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience artifact has the exact receipt provenance.",
+      "find": "        || artifact.event_id != receipt.event_id\n        || artifact.provenance != receipt.provenance",
+      "replace": "        || artifact.event_id != receipt.event_id\n        || false && artifact.provenance != receipt.provenance"
+    },
+    {
+      "id": "experience-trace-source-artifact-kind-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience artifact has the exact receipt kind.",
+      "find": "        || artifact.event_id != receipt.event_id\n        || artifact.provenance != receipt.provenance\n        || artifact.kind != receipt.kind",
+      "replace": "        || artifact.event_id != receipt.event_id\n        || artifact.provenance != receipt.provenance\n        || false && artifact.kind != receipt.kind"
+    },
+    {
+      "id": "experience-trace-source-artifact-timestamp-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace cited by an Experience artifact has the exact event timestamp.",
+      "find": "        || artifact.event_id != receipt.event_id\n        || artifact.provenance != receipt.provenance\n        || artifact.kind != receipt.kind\n        || artifact.timestamp_millis != event.timestamp_millis",
+      "replace": "        || artifact.event_id != receipt.event_id\n        || artifact.provenance != receipt.provenance\n        || artifact.kind != receipt.kind\n        || false && artifact.timestamp_millis != event.timestamp_millis"
+    },
+    {
+      "id": "experience-trace-source-redaction-count-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "A Trace receipt cannot claim more redacted fields than its artifact contains.",
+      "find": "        || artifact.timestamp_millis != event.timestamp_millis\n        || receipt.redacted_fields > artifact.fields.len()",
+      "replace": "        || artifact.timestamp_millis != event.timestamp_millis\n        || false && receipt.redacted_fields > artifact.fields.len()"
+    },
+    {
+      "id": "experience-rehydration-source-provenance-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Every rehydrated source has the exact run, Genome, and World provenance claimed by the Experience.",
+      "find": "            if source_provenance != &experience.receipt.provenance {",
+      "replace": "            if false && source_provenance != &experience.receipt.provenance {"
+    },
+    {
+      "id": "experience-rehydration-evidence-unverified",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Every evidence artifact cited by a rehydrated Experience exists and reproduces its declared content address.",
+      "find": "    for artifact_id in &receipt.evidence_artifact_ids {\n        verified_artifact(artifacts, artifact_id)?;\n    }",
+      "replace": "    for artifact_id in &receipt.evidence_artifact_ids {\n        let _unchecked = ArtifactId::parse(artifact_id.to_owned())?;\n    }"
+    },
+    {
+      "id": "experience-rehydration-event-hash-unbound",
+      "file": "crates/hephaestus-experience/src/rehydrate.rs",
+      "invariant": "Trusted Experience evidence identifies the exact verified canonical event hash.",
+      "find": "        event_hash: encode_hash(event.hash),",
+      "replace": "        event_hash: encode_hash([0; 32]),"
     }
   ]
 }

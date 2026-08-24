@@ -13,6 +13,10 @@ pub enum ExperienceError {
     RetentionExceeded { maximum: usize },
     /// An experience cites an event absent from verified canonical history.
     UnknownSourceEvent(String),
+    /// A requested canonical experience event does not exist.
+    UnknownExperience(String),
+    /// A stored experience event, receipt, or artifact is internally inconsistent.
+    InvalidStoredExperience(&'static str),
     /// Durable ledger or content-addressed storage failed.
     Ledger(LedgerError),
     /// Canonical JSON serialization or decoding failed.
@@ -33,7 +37,9 @@ impl Error for ExperienceError {
             Self::InvalidInput(_)
             | Self::RecordTooLarge { .. }
             | Self::RetentionExceeded { .. }
-            | Self::UnknownSourceEvent(_) => None,
+            | Self::UnknownSourceEvent(_)
+            | Self::UnknownExperience(_)
+            | Self::InvalidStoredExperience(_) => None,
         }
     }
 }

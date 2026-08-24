@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,13 +36,7 @@ impl Provenance {
             genome: genome_id.into(),
             world: world_id.into(),
         };
-        for field in [&value.run, &value.genome, &value.world] {
-            if field.trim().is_empty() || field.len() > MAX_IDENTIFIER_BYTES {
-                return Err(ExperienceError::InvalidInput(
-                    "provenance identifiers must be non-empty and bounded",
-                ));
-            }
-        }
+        value.validate()?;
         Ok(value)
     }
 
@@ -59,6 +53,17 @@ impl Provenance {
     #[must_use]
     pub fn world_id(&self) -> &str {
         &self.world
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ExperienceError> {
+        for field in [&self.run, &self.genome, &self.world] {
+            if field.trim().is_empty() || field.len() > MAX_IDENTIFIER_BYTES {
+                return Err(ExperienceError::InvalidInput(
+                    "provenance identifiers must be non-empty and bounded",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -179,9 +184,14 @@ impl ExperienceInput {
                 "experience requires source events",
             ));
         }
+        if source_event_ids.iter().collect::<BTreeSet<_>>().len() != source_event_ids.len() {
+            return Err(ExperienceError::InvalidInput(
+                "experience source events must be distinct",
+            ));
+        }
         if kind == ExperienceKind::Contradiction && source_event_ids.len() < 2 {
             return Err(ExperienceError::InvalidInput(
-                "contradiction requires at least two source events",
+                "contradiction requires at least two distinct source events",
             ));
         }
         if !(1..=10_000).contains(&confidence_bps) {
@@ -222,14 +232,87 @@ pub struct ExperienceReceipt {
     pub redacted_fields: usize,
 }
 
-fn validate_identifier(value: &str, error: &'static str) -> Result<(), ExperienceError> {
+/// Store-consistent Experience evidence for trusted operator-side consumers.
+///
+/// Instances can only be minted by [`crate::rehydrate_experience`] from a
+/// verified event ledger and content-addressed artifacts. The type deliberately
+/// has no public constructor and does not implement `Deserialize`. Rehydration
+/// verifies consistency and the recording convention; it does not authenticate
+/// the producer or prove that a raw-store writer redacted every field.
+///
+/// ```compile_fail
+/// use hephaestus_experience::TrustedExperience;
+///
+/// let _ = TrustedExperience {};
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TrustedExperience {
+    pub(crate) receipt: ExperienceReceipt,
+    pub(crate) timestamp_millis: i64,
+    pub(crate) fields: BTreeMap<String, String>,
+    pub(crate) event_hash: String,
+}
+
+impl TrustedExperience {
+    #[must_use]
+    pub fn experience_id(&self) -> &str {
+        &self.receipt.experience_id
+    }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &Provenance {
+        &self.receipt.provenance
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ExperienceKind {
+        self.receipt.kind
+    }
+
+    #[must_use]
+    pub const fn confidence_bps(&self) -> u16 {
+        self.receipt.confidence_bps
+    }
+
+    #[must_use]
+    pub const fn timestamp_millis(&self) -> i64 {
+        self.timestamp_millis
+    }
+
+    #[must_use]
+    pub fn source_event_ids(&self) -> &[String] {
+        &self.receipt.source_event_ids
+    }
+
+    #[must_use]
+    pub fn evidence_artifact_ids(&self) -> &[String] {
+        &self.receipt.evidence_artifact_ids
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.receipt.status
+    }
+
+    #[must_use]
+    pub const fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+
+    #[must_use]
+    pub fn event_hash(&self) -> &str {
+        &self.event_hash
+    }
+}
+
+pub(crate) fn validate_identifier(value: &str, error: &'static str) -> Result<(), ExperienceError> {
     if value.trim().is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
         return Err(ExperienceError::InvalidInput(error));
     }
     Ok(())
 }
 
-fn validate_fields(fields: &BTreeMap<String, String>) -> Result<(), ExperienceError> {
+pub(crate) fn validate_fields(fields: &BTreeMap<String, String>) -> Result<(), ExperienceError> {
     if fields.len() > MAX_FIELDS {
         return Err(ExperienceError::InvalidInput("too many structured fields"));
     }
