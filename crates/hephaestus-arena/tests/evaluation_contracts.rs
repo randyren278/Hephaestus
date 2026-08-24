@@ -180,10 +180,10 @@ fn plan(role: &str, replacement: Option<(&str, &str)>) -> TrialPlan {
 }
 
 fn make_fixture(directory: &TempDir) -> Fixture {
-    make_fixture_with_evaluator(
-        directory,
-        PathBuf::from(env!("CARGO_BIN_EXE_hephaestus-evaluator")),
-    )
+    let evaluator_path = directory.path().join("hephaestus-evaluator");
+    fs::copy(env!("CARGO_BIN_EXE_hephaestus-evaluator"), &evaluator_path).unwrap();
+    fs::set_permissions(&evaluator_path, fs::Permissions::from_mode(0o700)).unwrap();
+    make_fixture_with_evaluator(directory, evaluator_path)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -571,7 +571,9 @@ fn world_manifest_and_evaluator_semantics_fail_before_publication() {
     ));
     assert_eq!(artifact_file_count(&directory), before);
 
-    let evaluator_path = PathBuf::from(env!("CARGO_BIN_EXE_hephaestus-evaluator"));
+    let evaluator_path = directory.path().join("wrong-id-evaluator");
+    fs::copy(env!("CARGO_BIN_EXE_hephaestus-evaluator"), &evaluator_path).unwrap();
+    fs::set_permissions(&evaluator_path, fs::Permissions::from_mode(0o700)).unwrap();
     let wrong_id = ArtifactId::for_bytes(b"unimplemented-evaluator-v2");
     assert!(matches!(
         IsolatedEvaluator::open_with_policy(
