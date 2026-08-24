@@ -15,14 +15,14 @@ use std::{
 use fs2::FileExt;
 use hephaestus_core::authority::{CapabilitySet, FreezeState, OperatorToken};
 use hephaestus_experience::{
-    EvidenceRecorder, RecordedRuntime, RedactionPolicy, RetentionLimits, RunResultReceipt,
-    TraceKind, TraceReceipt,
+    EvidenceRecorder, RUN_RESULT_SCHEMA_VERSION, RecordedRuntime, RedactionPolicy, RetentionLimits,
+    RunResultReceipt, RunResultSigner, RunResultVerifier, TraceKind, TraceReceipt,
 };
 use hephaestus_genome::{SourceFormat, compile_world};
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
 use hephaestus_runtime::{
-    Budget, CapabilityToken, CompletionReason, DeterministicRuntime, RunSpec, RunStatus,
-    RuntimeAdapter, Sandbox, SandboxManager,
+    Budget, CapabilityToken, CompletionReason, DeterministicRuntime, ExperimentContext, RunSpec,
+    RunStatus, RuntimeAdapter, Sandbox, SandboxManager,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,9 @@ const MAX_REQUEST_BYTES: usize = 65_536;
 const MAX_REQUEST_READ_BYTES: u64 = 65_537;
 const CONTROL_AGGREGATE: &str = "hephaestus-control";
 const OPERATOR_ACTOR: &str = "local-operator";
+const MAX_EVALUATION_WALL_MILLIS: u64 = 86_400_000;
+const MAX_EVALUATION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EVALUATION_COST_MICROUSD: u64 = 1_000_000_000;
 
 /// Resolves `HEPHAESTUS_HOME`, then the conventional per-user data directory.
 ///
@@ -57,6 +60,8 @@ pub struct ControlPlane {
     source_repository: PathBuf,
     token_hex: String,
     operator_token: OperatorToken,
+    run_result_signer: RunResultSigner,
+    run_result_verifier: RunResultVerifier,
     storage: Option<CanonicalStorage>,
     state: ControlState,
     _lock: File,
@@ -66,6 +71,35 @@ pub struct ControlPlane {
 struct CanonicalStorage {
     ledger: EventStore,
     artifacts: ArtifactStore,
+}
+
+struct SandboxCleanupGuard {
+    sandbox: Option<Sandbox>,
+}
+
+impl SandboxCleanupGuard {
+    const fn new(sandbox: Sandbox) -> Self {
+        Self {
+            sandbox: Some(sandbox),
+        }
+    }
+
+    fn sandbox(&self) -> Result<&Sandbox, ExecuteError> {
+        self.sandbox.as_ref().ok_or(ExecuteError::Internal)
+    }
+
+    fn cleanup(mut self) -> Result<(), ExecuteError> {
+        let sandbox = self.sandbox.take().ok_or(ExecuteError::Internal)?;
+        sandbox.cleanup().map_err(|_| ExecuteError::Internal)
+    }
+}
+
+impl Drop for SandboxCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(sandbox) = self.sandbox.take() {
+            let _ = sandbox.cleanup();
+        }
+    }
 }
 
 impl ControlPlane {
@@ -102,13 +136,33 @@ impl ControlPlane {
         prepare_private_directory(&artifacts_path)?;
         let artifacts = ArtifactStore::open(artifacts_path)?;
         let history = ledger.replay_verified()?;
-        let state = ControlState::from_events(&history, &operator_token)?;
-        state.verify_artifacts(&history, &artifacts)?;
+        reject_legacy_run_result_history(&history)?;
+        let has_run_results = history
+            .iter()
+            .any(|event| event.event_type == "run.result_recorded");
+        let anchored_verifier = anchored_world_verifier(&history, &artifacts)?;
+        let run_result_signer = load_or_create_run_result_signer(
+            &data_dir.join("runtime-producer.key"),
+            !has_run_results && anchored_verifier.is_none(),
+        )?;
+        let run_result_verifier = run_result_signer.verifier();
+        if anchored_verifier
+            .as_ref()
+            .is_some_and(|key| key != &run_result_verifier.public_key_bytes())
+        {
+            return Err(ControlError::Protocol(
+                "runtime producer key does not match registered World verifier",
+            ));
+        }
+        let state = ControlState::from_events(&history, &operator_token, &run_result_verifier)?;
+        state.verify_artifacts(&history, &artifacts, &run_result_verifier)?;
         Ok(Self {
             data_dir,
             source_repository,
             token_hex,
             operator_token,
+            run_result_signer,
+            run_result_verifier,
             storage: Some(CanonicalStorage { ledger, artifacts }),
             state,
             _lock: lock,
@@ -226,7 +280,8 @@ impl ControlPlane {
         {
             return Err(ExecuteError::Invalid("genome_id is required"));
         }
-        if let Command::RunReference { genome_id } = &command
+        if let Command::RunReference { genome_id } | Command::RunEvaluation { genome_id, .. } =
+            &command
             && genome_id.trim().is_empty()
         {
             return Err(ExecuteError::Invalid("genome_id is required"));
@@ -252,6 +307,27 @@ impl ControlPlane {
             Command::RunReference { genome_id } => {
                 let run_id = format!("reference-{}", self.state.event_count);
                 self.run_reference(&run_id, &genome_id)
+            }
+            Command::RunEvaluation {
+                genome_id,
+                task_id,
+                input,
+                seed,
+                wall_millis,
+                maximum_output_bytes,
+                maximum_cost_microusd,
+            } => {
+                let run_id = format!("evaluation-{}", self.state.event_count);
+                self.run_evaluation(
+                    &run_id,
+                    &genome_id,
+                    &task_id,
+                    &input,
+                    seed,
+                    wall_millis,
+                    maximum_output_bytes,
+                    maximum_cost_microusd,
+                )
             }
             Command::Replay => self.replay_response(),
             Command::DaemonStop => {
@@ -291,7 +367,7 @@ impl ControlPlane {
             ))
             .map_err(|_| ExecuteError::Internal)?;
         self.state
-            .apply(&event, &self.operator_token)
+            .apply(&event, &self.operator_token, &self.run_result_verifier)
             .map_err(|_| ExecuteError::Internal)?;
         Ok(())
     }
@@ -304,8 +380,9 @@ impl ControlPlane {
             .ledger
             .replay_verified()
             .map_err(|_| ExecuteError::Internal)?;
-        let replayed = ControlState::from_events(&history, &self.operator_token)
-            .map_err(|_| ExecuteError::Internal)?;
+        let replayed =
+            ControlState::from_events(&history, &self.operator_token, &self.run_result_verifier)
+                .map_err(|_| ExecuteError::Internal)?;
         if replayed.snapshot() != self.state.snapshot() {
             return Err(ExecuteError::Internal);
         }
@@ -324,6 +401,13 @@ impl ControlPlane {
         run_id: &str,
         genome_id: &str,
     ) -> Result<ResponseData, ExecuteError> {
+        let genome = self.runnable_genome(genome_id)?;
+        let result = self.run_reference_inner(run_id, &genome);
+        self.refresh_projection()?;
+        result
+    }
+
+    fn runnable_genome(&self, genome_id: &str) -> Result<GenomeRecord, ExecuteError> {
         if self.state.freeze.is_frozen() {
             return Err(ExecuteError::Invalid("evolution is frozen"));
         }
@@ -336,9 +420,7 @@ impl ControlPlane {
         if !self.state.worlds.contains_key(&genome.world_id) {
             return Err(ExecuteError::Invalid("Genome World is not registered"));
         }
-        let result = self.run_reference_inner(run_id, &genome);
-        self.refresh_projection()?;
-        result
+        Ok(genome)
     }
 
     fn run_reference_inner(
@@ -346,45 +428,134 @@ impl ControlPlane {
         run_id: &str,
         genome: &GenomeRecord,
     ) -> Result<ResponseData, ExecuteError> {
-        let budget = Budget::new(Duration::from_secs(10), 1_048_576, 0)
+        let prompt = "Inventory the isolated repository without modifying it or using the network.";
+        self.run_with_context(
+            run_id,
+            genome,
+            "repository-inventory-v1",
+            prompt,
+            0,
+            10_000,
+            1_048_576,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_evaluation(
+        &mut self,
+        run_id: &str,
+        genome_id: &str,
+        task_id: &str,
+        input: &str,
+        seed: u64,
+        wall_millis: u64,
+        maximum_output_bytes: u64,
+        maximum_cost_microusd: u64,
+    ) -> Result<ResponseData, ExecuteError> {
+        let genome = self.runnable_genome(genome_id)?;
+        let world_cost_ceiling = self.registered_world_cost_ceiling(&genome.world_id)?;
+        if maximum_cost_microusd > world_cost_ceiling {
+            return Err(ExecuteError::Invalid(
+                "evaluation cost exceeds registered World Law",
+            ));
+        }
+        let result = self.run_with_context(
+            run_id,
+            &genome,
+            task_id,
+            input,
+            seed,
+            wall_millis,
+            maximum_output_bytes,
+            maximum_cost_microusd,
+        );
+        self.refresh_projection()?;
+        result
+    }
+
+    fn registered_world_cost_ceiling(&self, world_id: &str) -> Result<u64, ExecuteError> {
+        let world = self
+            .state
+            .worlds
+            .get(world_id)
+            .ok_or(ExecuteError::Internal)?;
+        let storage = self.storage.as_ref().ok_or(ExecuteError::Internal)?;
+        let artifact_id =
+            ArtifactId::parse(world.artifact_id.clone()).map_err(|_| ExecuteError::Internal)?;
+        let bytes = storage
+            .artifacts
+            .get(&artifact_id)
             .map_err(|_| ExecuteError::Internal)?;
-        let spec = RunSpec::new(
+        let source = std::str::from_utf8(&bytes).map_err(|_| ExecuteError::Internal)?;
+        let compiled = compile_world(source, SourceFormat::Json, &storage.artifacts)
+            .map_err(|_| ExecuteError::Internal)?;
+        Ok(compiled.evaluation_policy().maximum_cost_microusd())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_context(
+        &mut self,
+        run_id: &str,
+        genome: &GenomeRecord,
+        task_id: &str,
+        prompt: &str,
+        seed: u64,
+        wall_millis: u64,
+        maximum_output_bytes: u64,
+        maximum_cost_microusd: u64,
+    ) -> Result<ResponseData, ExecuteError> {
+        let budget =
+            validated_evaluation_budget(wall_millis, maximum_output_bytes, maximum_cost_microusd)?;
+        let environment_id = reference_environment_id();
+        let experiment = ExperimentContext::new(task_id, prompt.as_bytes(), seed, environment_id)
+            .map_err(|_| ExecuteError::Invalid("evaluation context is invalid"))?;
+        let spec = RunSpec::new_for_experiment(
             run_id,
             &genome.genome_id,
             &genome.world_id,
             &self.source_repository,
-            "Inventory the isolated repository without modifying it or using the network.",
+            prompt,
             CapabilitySet::new(false, false),
             budget,
+            experiment,
         )
         .map_err(|_| ExecuteError::Invalid("run specification is invalid"))?;
         let manager =
             SandboxManager::open(self.data_dir.join("sandboxes"), Duration::from_secs(30))
                 .map_err(|_| ExecuteError::Internal)?;
         let (sandbox, token) = manager.create(&spec).map_err(|_| ExecuteError::Internal)?;
-        let limits = RetentionLimits::new(10_000, 65_536).map_err(|_| ExecuteError::Internal)?;
-        let storage = self.storage.take().ok_or(ExecuteError::Internal)?;
-        let recorder = EvidenceRecorder::from_stores(
-            storage.ledger,
-            storage.artifacts,
-            RedactionPolicy::new([self.token_hex.clone()]),
-            limits,
-        );
-        let (execution, recorder) =
-            execute_reference_runtime(recorder, &spec, &sandbox, &token, run_id);
-        let (ledger, artifacts) = recorder.into_stores();
-        let execution = execution.and_then(|output| {
-            persist_reference_output(&artifacts, run_id, genome, spec.source_revision(), output)
-        });
-        self.storage = Some(CanonicalStorage { ledger, artifacts });
-        let cleanup = sandbox.cleanup().map_err(|_| ExecuteError::Internal);
-        cleanup?;
+        let sandbox = SandboxCleanupGuard::new(sandbox);
+        let execution = (|| {
+            let limits =
+                RetentionLimits::new(10_000, 65_536).map_err(|_| ExecuteError::Internal)?;
+            let storage = self.storage.take().ok_or(ExecuteError::Internal)?;
+            let recorder = EvidenceRecorder::from_stores(
+                storage.ledger,
+                storage.artifacts,
+                RedactionPolicy::new([self.token_hex.clone()]),
+                limits,
+            );
+            let (execution, recorder) =
+                execute_reference_runtime(recorder, &spec, sandbox.sandbox()?, &token, run_id);
+            let (ledger, artifacts) = recorder.into_stores();
+            let execution = execution.and_then(|output| {
+                persist_reference_output(&artifacts, run_id, genome, spec.source_revision(), output)
+            });
+            self.storage = Some(CanonicalStorage { ledger, artifacts });
+            execution
+        })();
+        sandbox.cleanup()?;
         let response = execution?;
-        self.append_run_result(&response)?;
+        self.append_run_result(&spec, &response)?;
         Ok(response)
     }
 
-    fn append_run_result(&mut self, response: &ResponseData) -> Result<(), ExecuteError> {
+    fn append_run_result(
+        &mut self,
+        spec: &RunSpec,
+        response: &ResponseData,
+    ) -> Result<(), ExecuteError> {
         let ResponseData::Run {
             run_id,
             genome_id,
@@ -400,11 +571,15 @@ impl ControlPlane {
         else {
             return Err(ExecuteError::Internal);
         };
-        let receipt = RunResultReceipt::new(
-            run_id.clone(),
-            genome_id.clone(),
-            world_id.clone(),
-            source_revision.clone(),
+        if run_id != spec.run_id()
+            || genome_id != spec.genome_id()
+            || world_id != spec.world_id()
+            || source_revision != spec.source_revision()
+        {
+            return Err(ExecuteError::Internal);
+        }
+        let receipt = RunResultReceipt::from_run_spec(
+            spec,
             *completion_reason,
             *latency_millis,
             *actual_cost_microusd,
@@ -414,15 +589,15 @@ impl ControlPlane {
         )
         .map_err(|_| ExecuteError::Internal)?;
         let timestamp = timestamp_millis().map_err(|_| ExecuteError::Internal)?;
+        let event = self
+            .run_result_signer
+            .issue(receipt, timestamp)
+            .map_err(|_| ExecuteError::Internal)?;
         self.storage
             .as_mut()
             .ok_or(ExecuteError::Internal)?
             .ledger
-            .append(
-                receipt
-                    .into_event_input(timestamp)
-                    .map_err(|_| ExecuteError::Internal)?,
-            )
+            .append(event)
             .map_err(|_| ExecuteError::Internal)?;
         Ok(())
     }
@@ -433,10 +608,11 @@ impl ControlPlane {
             .ledger
             .replay_verified()
             .map_err(|_| ExecuteError::Internal)?;
-        let state = ControlState::from_events(&history, &self.operator_token)
-            .map_err(|_| ExecuteError::Internal)?;
+        let state =
+            ControlState::from_events(&history, &self.operator_token, &self.run_result_verifier)
+                .map_err(|_| ExecuteError::Internal)?;
         state
-            .verify_artifacts(&history, &storage.artifacts)
+            .verify_artifacts(&history, &storage.artifacts, &self.run_result_verifier)
             .map_err(|_| ExecuteError::Internal)?;
         self.state = state;
         Ok(())
@@ -563,6 +739,7 @@ impl ControlState {
     fn from_events(
         events: &[StoredEvent],
         operator_token: &OperatorToken,
+        run_result_verifier: &RunResultVerifier,
     ) -> Result<Self, ControlError> {
         let mut state = Self {
             freeze: FreezeState::frozen(operator_token),
@@ -572,7 +749,7 @@ impl ControlState {
             event_count: 0,
         };
         for event in events {
-            state.apply(event, operator_token)?;
+            state.apply(event, operator_token, run_result_verifier)?;
         }
         Ok(state)
     }
@@ -581,6 +758,7 @@ impl ControlState {
         &mut self,
         event: &StoredEvent,
         operator_token: &OperatorToken,
+        run_result_verifier: &RunResultVerifier,
     ) -> Result<(), ControlError> {
         if event.event_type.starts_with("control.") {
             if event.aggregate_id != CONTROL_AGGREGATE || event.actor != OPERATOR_ACTOR {
@@ -653,7 +831,7 @@ impl ControlState {
                 }
                 self.worlds.insert(world.world_id.clone(), world);
             }
-            "run.result_recorded" => validate_run_result(event)?,
+            "run.result_recorded" => validate_run_result(event, run_result_verifier)?,
             _ => {}
         }
         self.event_count = event.sequence;
@@ -683,6 +861,7 @@ impl ControlState {
         &self,
         history: &[StoredEvent],
         artifacts: &ArtifactStore,
+        run_result_verifier: &RunResultVerifier,
     ) -> Result<(), ControlError> {
         for genome in self.genomes.values() {
             let id = ArtifactId::parse(genome.artifact_id.clone())?;
@@ -702,15 +881,25 @@ impl ControlState {
                     "registered World metadata does not match compiled artifact".to_owned(),
                 ));
             }
+            if let Some(verifier_id) = compiled.evaluator_artifact("arena.runtime_verifier") {
+                let bytes = artifacts.get(&ArtifactId::parse(verifier_id)?)?;
+                if bytes.as_slice() != run_result_verifier.public_key_bytes() {
+                    return Err(ControlError::Projection(
+                        "registered World runtime verifier does not match daemon producer"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         for event in history {
             if event.event_type == "trace.recorded" {
                 let receipt: TraceReceipt = serde_json::from_slice(&event.payload)?;
                 artifacts.get(&ArtifactId::parse(receipt.artifact_id)?)?;
             } else if event.event_type == "run.result_recorded" {
-                let receipt = RunResultReceipt::parse_from_event(event).map_err(|_| {
-                    ControlError::Projection("canonical run result is invalid".to_owned())
-                })?;
+                let receipt = RunResultReceipt::parse_from_event(event, run_result_verifier)
+                    .map_err(|_| {
+                        ControlError::Projection("canonical run result is invalid".to_owned())
+                    })?;
                 artifacts.get(&ArtifactId::parse(receipt.stdout_artifact_id)?)?;
                 artifacts.get(&ArtifactId::parse(receipt.stderr_artifact_id)?)?;
                 for artifact in receipt.trace_artifact_ids {
@@ -790,8 +979,11 @@ fn validate_trace_receipt(event: &StoredEvent, receipt: &TraceReceipt) -> Result
     Ok(())
 }
 
-fn validate_run_result(event: &StoredEvent) -> Result<(), ControlError> {
-    RunResultReceipt::parse_from_event(event)
+fn validate_run_result(
+    event: &StoredEvent,
+    run_result_verifier: &RunResultVerifier,
+) -> Result<(), ControlError> {
+    RunResultReceipt::parse_from_event(event, run_result_verifier)
         .map(|_| ())
         .map_err(|_| ControlError::Projection("canonical run result is invalid".to_owned()))
 }
@@ -847,9 +1039,43 @@ fn event_type(command: &Command) -> &'static str {
         Command::KillAll => "control.kill_all",
         Command::GenomeShow { .. } => "control.genome_show",
         Command::RunReference { .. } => "control.run_reference",
+        Command::RunEvaluation { .. } => "control.run_evaluation",
         Command::Replay => "control.replay",
         Command::DaemonStop => "control.daemon_stop",
     }
+}
+
+fn reference_environment_id() -> String {
+    format!(
+        "deterministic-v1.runtime-{}.receipt-schema-{}.{}.{}.isolation-private-worktree-v1.backend-git",
+        env!("CARGO_PKG_VERSION"),
+        RUN_RESULT_SCHEMA_VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+fn validated_evaluation_budget(
+    wall_millis: u64,
+    maximum_output_bytes: u64,
+    maximum_cost_microusd: u64,
+) -> Result<Budget, ExecuteError> {
+    if wall_millis == 0
+        || wall_millis > MAX_EVALUATION_WALL_MILLIS
+        || maximum_output_bytes == 0
+        || maximum_output_bytes > MAX_EVALUATION_OUTPUT_BYTES
+        || maximum_cost_microusd > MAX_EVALUATION_COST_MICROUSD
+    {
+        return Err(ExecuteError::Invalid("evaluation budget is invalid"));
+    }
+    let maximum_output_bytes = usize::try_from(maximum_output_bytes)
+        .map_err(|_| ExecuteError::Invalid("evaluation output budget is invalid"))?;
+    Budget::new(
+        Duration::from_millis(wall_millis),
+        maximum_output_bytes,
+        maximum_cost_microusd,
+    )
+    .map_err(|_| ExecuteError::Invalid("evaluation budget is invalid"))
 }
 
 fn validate_source_repository(path: &Path) -> Result<PathBuf, ControlError> {
@@ -947,6 +1173,109 @@ fn load_or_create_token(path: &Path) -> Result<(String, [u8; 32]), ControlError>
     let token = fs::read_to_string(path)?;
     let bytes = hex_decode(&token)?;
     Ok((token, bytes))
+}
+
+fn load_or_create_run_result_signer(
+    path: &Path,
+    allow_create: bool,
+) -> Result<RunResultSigner, ControlError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ControlError::Protocol(
+                "runtime producer key path is unsafe",
+            ));
+        }
+        Ok(metadata) if metadata.permissions().mode() & 0o077 != 0 => {
+            return Err(ControlError::Protocol(
+                "runtime producer key permissions are unsafe",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_create => {
+            let mut seed = [0_u8; 32];
+            File::open("/dev/urandom")?.read_exact(&mut seed)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(&seed)?;
+            file.sync_all()?;
+            let parent = path
+                .parent()
+                .ok_or(ControlError::Protocol("runtime producer key has no parent"))?;
+            File::open(parent)?.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ControlError::Protocol(
+                "runtime producer key is missing for canonical results or a registered World verifier",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let bytes = fs::read(path)?;
+    let seed: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ControlError::Protocol("runtime producer key is malformed"))?;
+    Ok(RunResultSigner::from_seed(seed))
+}
+
+fn reject_legacy_run_result_history(history: &[StoredEvent]) -> Result<(), ControlError> {
+    for event in history
+        .iter()
+        .filter(|event| event.event_type == "run.result_recorded")
+    {
+        let value: serde_json::Value = serde_json::from_slice(&event.payload)?;
+        let signed = value.get("claims").is_some()
+            && value.get("producer_key_id").is_some()
+            && value.get("signature").is_some();
+        if !signed {
+            return Err(ControlError::Protocol(
+                "legacy unsigned run-result history is incompatible; back up the data directory and reinitialize it before this release",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn anchored_world_verifier(
+    history: &[StoredEvent],
+    artifacts: &ArtifactStore,
+) -> Result<Option<[u8; 32]>, ControlError> {
+    let mut anchored = None;
+    for event in history
+        .iter()
+        .filter(|event| event.event_type == "world.registered")
+    {
+        let world: WorldRecord = serde_json::from_slice(&event.payload)?;
+        let bytes = artifacts.get(&ArtifactId::parse(world.artifact_id)?)?;
+        let source = std::str::from_utf8(&bytes).map_err(|_| {
+            ControlError::Projection("canonical World artifact is not UTF-8".to_owned())
+        })?;
+        let compiled = compile_world(source, SourceFormat::Json, artifacts).map_err(|_| {
+            ControlError::Projection("canonical World artifact failed compilation".to_owned())
+        })?;
+        let Some(verifier_id) = compiled.evaluator_artifact("arena.runtime_verifier") else {
+            continue;
+        };
+        let verifier_bytes = artifacts.get(&ArtifactId::parse(verifier_id)?)?;
+        let verifier: [u8; 32] = verifier_bytes.try_into().map_err(|_| {
+            ControlError::Projection("World runtime verifier is not an Ed25519 key".to_owned())
+        })?;
+        RunResultVerifier::from_public_key_bytes(verifier).map_err(|_| {
+            ControlError::Projection("World runtime verifier is not an Ed25519 key".to_owned())
+        })?;
+        if anchored
+            .as_ref()
+            .is_some_and(|existing| existing != &verifier)
+        {
+            return Err(ControlError::Projection(
+                "registered Worlds anchor different runtime verifiers".to_owned(),
+            ));
+        }
+        anchored = Some(verifier);
+    }
+    Ok(anchored)
 }
 
 fn hex_encode(bytes: &[u8; 32]) -> String {
@@ -1075,6 +1404,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn projection_rejects_mismatched_commands_and_mutable_genome_metadata() {
         let token = OperatorToken::from_bytes([7; 32]);
+        let run_result_verifier = RunResultSigner::from_seed([8; 32]).verifier();
         let mismatched = stored_event(
             1,
             "control.freeze",
@@ -1083,7 +1413,7 @@ mod tests {
             br#"{"request_id":"mismatch","command":{"command":"unfreeze"}}"#,
         );
         assert!(matches!(
-            ControlState::from_events(&[mismatched], &token),
+            ControlState::from_events(&[mismatched], &token, &run_result_verifier),
             Err(ControlError::Projection(_))
         ));
 
@@ -1114,7 +1444,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            ControlState::from_events(&events, &token),
+            ControlState::from_events(&events, &token, &run_result_verifier),
             Err(ControlError::Projection(_))
         ));
 
@@ -1122,7 +1452,8 @@ mod tests {
             stored_event(1, "run.started", "run", "runtime", br#"{"run_id":"r1"}"#),
             stored_event(2, "run.completed", "run", "runtime", br#"{"run_id":"r1"}"#),
         ];
-        let state = ControlState::from_events(&lifecycle, &token).expect("replay run lifecycle");
+        let state = ControlState::from_events(&lifecycle, &token, &run_result_verifier)
+            .expect("replay run lifecycle");
         assert!(state.active_runs.is_empty());
 
         let provenance = Provenance::new(
@@ -1163,8 +1494,8 @@ mod tests {
                 &serde_json::to_vec(&completed).expect("encode completed trace"),
             ),
         ];
-        let replayed_trace_state =
-            ControlState::from_events(&traces, &token).expect("replay trace lifecycle");
+        let replayed_trace_state = ControlState::from_events(&traces, &token, &run_result_verifier)
+            .expect("replay trace lifecycle");
         assert!(replayed_trace_state.active_runs.is_empty());
 
         let world = WorldRecord {
@@ -1191,7 +1522,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            ControlState::from_events(&world_events, &token),
+            ControlState::from_events(&world_events, &token, &run_result_verifier),
             Err(ControlError::Projection(_))
         ));
     }
@@ -1207,6 +1538,26 @@ mod tests {
         ));
         assert!(matches!(
             hex_decode(&"g".repeat(64)),
+            Err(ControlError::Protocol(_))
+        ));
+
+        let key_directory = tempdir().expect("producer key directory");
+        let missing_producer_key = key_directory.path().join("missing-producer.key");
+        assert!(matches!(
+            load_or_create_run_result_signer(&missing_producer_key, false),
+            Err(ControlError::Protocol(_))
+        ));
+        let producer_key = key_directory.path().join("producer.key");
+        let first_verifier = load_or_create_run_result_signer(&producer_key, true)
+            .expect("create producer key")
+            .verifier();
+        let reopened_verifier = load_or_create_run_result_signer(&producer_key, false)
+            .expect("reload producer key")
+            .verifier();
+        assert_eq!(first_verifier, reopened_verifier);
+        fs::set_permissions(&producer_key, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            load_or_create_run_result_signer(&producer_key, false),
             Err(ControlError::Protocol(_))
         ));
 
@@ -1309,11 +1660,20 @@ mod tests {
         ));
 
         let result_payload = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": "run",
             "genome_id": format!("hephaestus:genome:{}", "8".repeat(64)),
             "world_id": format!("hephaestus:world:{}", "7".repeat(64)),
             "source_revision": "6".repeat(40),
+            "task_id": "task",
+            "input_commitment": "5".repeat(64),
+            "seed": 1,
+            "environment_id": "environment-v1",
+            "budget": {
+                "wall_millis": 10_000,
+                "maximum_output_bytes": 1_048_576,
+                "maximum_cost_microusd": 0
+            },
             "completion_reason": "success",
             "latency_millis": 1,
             "actual_cost_microusd": 0,
@@ -1328,8 +1688,9 @@ mod tests {
             "forged",
             &serde_json::to_vec(&result_payload).expect("encode result"),
         );
+        let run_result_verifier = RunResultSigner::from_seed([8; 32]).verifier();
         assert!(matches!(
-            validate_run_result(&forged_result),
+            validate_run_result(&forged_result, &run_result_verifier),
             Err(ControlError::Projection(_))
         ));
         for reason in [
@@ -1341,6 +1702,158 @@ mod tests {
         ] {
             assert_ne!(run_completion_reason(reason), RunCompletionReason::Success);
         }
+    }
+
+    #[test]
+    fn legacy_unsigned_run_results_fail_with_actionable_incompatibility() {
+        let directory = tempdir().expect("legacy directory");
+        let database = directory.path().join("events.sqlite3");
+        let mut ledger = EventStore::open(&database).expect("open legacy ledger");
+        ledger
+            .append(EventInput::new(
+                "result:legacy",
+                "run:legacy",
+                "run.result_recorded",
+                "runtime-plane",
+                1,
+                br#"{"schema_version":1,"run_id":"legacy"}"#,
+            ))
+            .expect("append legacy result");
+        drop(ledger);
+        let Err(error) = ControlPlane::open(directory.path()) else {
+            panic!("legacy startup must fail");
+        };
+        assert!(format!("{error}").contains("back up the data directory and reinitialize"));
+        assert!(!directory.path().join("runtime-producer.key").exists());
+    }
+
+    #[test]
+    fn evaluation_budget_boundaries_are_validated_before_execution() {
+        assert!(validated_evaluation_budget(10_001, 1_048_576, 0).is_ok());
+        assert!(
+            validated_evaluation_budget(
+                MAX_EVALUATION_WALL_MILLIS,
+                MAX_EVALUATION_OUTPUT_BYTES,
+                MAX_EVALUATION_COST_MICROUSD,
+            )
+            .is_ok()
+        );
+        assert!(
+            validated_evaluation_budget(MAX_EVALUATION_WALL_MILLIS + 1, 1_048_576, 0,).is_err()
+        );
+        assert!(
+            validated_evaluation_budget(10_000, 1_048_576, MAX_EVALUATION_COST_MICROUSD + 1,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn world_verifier_and_producer_key_failures_are_covered() {
+        let directory = tempdir().expect("fixture directory");
+        let artifacts = ArtifactStore::open(directory.path().join("blobs")).expect("artifacts");
+
+        let non_utf8 = artifacts.put(&[0xff]).expect("non-UTF-8 artifact");
+        let non_utf8_world = world_registration_event(1, "non-utf8", non_utf8.as_str());
+        assert!(anchored_world_verifier(&[non_utf8_world], &artifacts).is_err());
+
+        let invalid_json = artifacts.put(b"{").expect("invalid World artifact");
+        let invalid_world = world_registration_event(1, "invalid", invalid_json.as_str());
+        assert!(anchored_world_verifier(&[invalid_world], &artifacts).is_err());
+
+        let short_key = artifacts.put(b"short verifier").expect("short verifier");
+        let (short_event, _) = compiled_world_registration(&artifacts, "short", short_key.as_str());
+        assert!(anchored_world_verifier(&[short_event], &artifacts).is_err());
+
+        let first_signer = RunResultSigner::from_seed([21; 32]);
+        let second_signer = RunResultSigner::from_seed([22; 32]);
+        let first_key = artifacts
+            .put(&first_signer.verifier().public_key_bytes())
+            .expect("first verifier");
+        let second_key = artifacts
+            .put(&second_signer.verifier().public_key_bytes())
+            .expect("second verifier");
+        let (first_event, first_world) =
+            compiled_world_registration(&artifacts, "first", first_key.as_str());
+        let (second_event, _) =
+            compiled_world_registration(&artifacts, "second", second_key.as_str());
+        assert!(anchored_world_verifier(&[first_event.clone(), second_event], &artifacts).is_err());
+
+        let token = OperatorToken::from_bytes([23; 32]);
+        let state = ControlState::from_events(&[first_event], &token, &first_signer.verifier())
+            .expect("World projection");
+        assert!(
+            state
+                .verify_artifacts(&[], &artifacts, &second_signer.verifier())
+                .is_err()
+        );
+
+        let mut mismatched = first_world;
+        mismatched.name = "forged-name".to_owned();
+        let mismatched_event = stored_event(
+            1,
+            "world.registered",
+            &mismatched.world_id,
+            "test-fixture",
+            &serde_json::to_vec(&mismatched).expect("mismatched World"),
+        );
+        let mismatched_state =
+            ControlState::from_events(&[mismatched_event], &token, &first_signer.verifier())
+                .expect("mismatched projection");
+        assert!(
+            mismatched_state
+                .verify_artifacts(&[], &artifacts, &first_signer.verifier())
+                .is_err()
+        );
+
+        let producer_key = directory.path().join("producer.key");
+        fs::write(&producer_key, [24; 32]).expect("producer key");
+        fs::set_permissions(&producer_key, fs::Permissions::from_mode(0o600)).unwrap();
+        let producer_link = directory.path().join("producer-link.key");
+        symlink(&producer_key, &producer_link).expect("producer key link");
+        assert!(load_or_create_run_result_signer(&producer_link, false).is_err());
+    }
+
+    fn compiled_world_registration(
+        artifacts: &ArtifactStore,
+        name: &str,
+        verifier_id: &str,
+    ) -> (StoredEvent, WorldRecord) {
+        let source = format!(
+            r#"{{"schema_version":1,"name":"{name}","laws":{{"candidate_network":false,"candidate_evaluator_access":false,"maximum_cost_microusd":0}},"authority_ceiling":{{"workspace_write":false,"network":false}},"mutation_scope":[],"promotion":{{"minimum_delta_bps":0,"maximum_regressions":0,"confidence_bps":9500}},"objectives":["coverage"],"evaluator_artifacts":{{"arena.runtime_verifier":"{verifier_id}"}}}}"#
+        );
+        let compiled =
+            compile_world(&source, SourceFormat::Json, artifacts).expect("compile World");
+        let artifact = artifacts
+            .put(compiled.canonical_json())
+            .expect("canonical World artifact");
+        let record = WorldRecord {
+            world_id: compiled.id().to_owned(),
+            name: compiled.name().to_owned(),
+            artifact_id: artifact.as_str().to_owned(),
+        };
+        let event = stored_event(
+            1,
+            "world.registered",
+            &record.world_id,
+            "test-fixture",
+            &serde_json::to_vec(&record).expect("World record"),
+        );
+        (event, record)
+    }
+
+    fn world_registration_event(sequence: u64, name: &str, artifact_id: &str) -> StoredEvent {
+        let record = WorldRecord {
+            world_id: format!("hephaestus:world:{}", "d".repeat(64)),
+            name: name.to_owned(),
+            artifact_id: artifact_id.to_owned(),
+        };
+        stored_event(
+            sequence,
+            "world.registered",
+            &record.world_id,
+            "test-fixture",
+            &serde_json::to_vec(&record).expect("World record"),
+        )
     }
 
     fn stored_event(

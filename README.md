@@ -11,7 +11,7 @@ flowchart LR
     Evidence --> Promotion[Deterministic promotion]
 ```
 
-The repository now has an executable constitution, durable evidence spine, fail-closed Genome and World compilers, runnable local control plane, provider-neutral runtime substrate, and provenance-backed Experience Plane. `crates/hephaestus-core/` owns authority and domain Laws. `crates/hephaestus-ledger/` owns canonical events and artifacts. `crates/hephaestus-genome/` derives immutable identities. `crates/hephaestus-control/` provides the single-writer daemon and operator CLI, including a real non-billable `hephaestus run <genome-id>` path for registered Worlds and Genomes. `crates/hephaestus-runtime/` creates private Git worktrees, expiring run-bound capabilities, independently supervised local processes with hard wall/output limits, fail-closed macOS Seatbelt isolation, and inert Codex/Claude invocation contracts. `crates/hephaestus-experience/` wraps runtimes with required redacted lifecycle evidence, bounds observable traces before CAS persistence, then links structured observations, hypotheses, evidence, and contradictions to verified source events. CI deliberately breaks each invariant and requires the suite to detect the regression.
+The repository now has an executable constitution, durable evidence spine, fail-closed Genome and World compilers, runnable local control plane, provider-neutral runtime substrate, provenance-backed Experience Plane, and a deterministic measurement-only Arena. `crates/hephaestus-core/` owns authority and domain Laws. `crates/hephaestus-ledger/` owns canonical events and artifacts. `crates/hephaestus-genome/` derives immutable identities. `crates/hephaestus-control/` provides the single-writer daemon and operator CLI, including real non-billable `hephaestus run <genome-id>` and typed paired-evaluation paths for registered Worlds and Genomes. `crates/hephaestus-runtime/` creates private pinned Git worktrees, expiring run-bound capabilities, independently supervised local processes with hard wall/output limits, fail-closed macOS Seatbelt isolation, and inert Codex/Claude invocation contracts. `crates/hephaestus-experience/` wraps runtimes with required redacted lifecycle evidence and owns the daemon-signed canonical run-result schema. `crates/hephaestus-arena/` resolves task outputs only from authenticated result events, enforces exact task/input/seed/environment/budget pairing, binds the verifier/evaluator/manifests through the compiled World, keeps sealed evidence out of its public summary, and records idempotent receipts. CI deliberately breaks each invariant and requires the suite to detect the regression.
 
 ## Development
 
@@ -24,7 +24,7 @@ cargo test --workspace
 PYTHONPATH=python python3 -m unittest discover -s python/tests -v
 cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 python3 checks/coverage_gate.py --manifest checks/checks.json --report lcov.info
-python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 121
+python3 checks/mutation_guard.py --manifest checks/checks.json --assert-min 163
 python3 checks/docs_gate.py --root . --min-diagrams 1 README.md docs/ARCHITECTURE.md
 ```
 

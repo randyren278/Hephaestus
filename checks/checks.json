@@ -1,6 +1,8 @@
 {
   "test_command": "cargo test --workspace --quiet",
   "mutation_test_commands": {
+    "checks/": "env PYTHONPATH=python python3 -m unittest python.tests.test_mutation_guard -v",
+    "crates/hephaestus-arena/": "cargo test -p hephaestus-arena --quiet",
     "crates/hephaestus-control/": "cargo test -p hephaestus-control --quiet",
     "crates/hephaestus-core/": "cargo test -p hephaestus-core --quiet",
     "crates/hephaestus-experience/": "cargo test -p hephaestus-experience --quiet",
@@ -10,8 +12,12 @@
     "python/": "env PYTHONPATH=python python3 -m unittest discover -s python/tests -v"
   },
   "timeout_seconds": 120,
+  "mutation_timeout_seconds": {
+    "crates/hephaestus-control/": 240
+  },
   "coverage_floor": 95.0,
   "critical_modules": [
+    "crates/hephaestus-arena/src/lib.rs",
     "crates/hephaestus-core/src/authority.rs",
     "crates/hephaestus-core/src/domain.rs",
     "crates/hephaestus-control/src/client.rs",
@@ -381,8 +387,8 @@
       "id": "unsafe-run-id-accepted",
       "file": "crates/hephaestus-runtime/src/spec.rs",
       "invariant": "Run identifiers cannot escape the sandbox root.",
-      "find": "        if run_id.is_empty()\n            || !run_id\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))\n        {",
-      "replace": "        if false {"
+      "find": "            || !run_id\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))",
+      "replace": "            || false"
     },
     {
       "id": "sandbox-capability-proof-bypassed",
@@ -409,8 +415,15 @@
       "id": "runtime-output-budget-bypassed",
       "file": "crates/hephaestus-runtime/src/deterministic.rs",
       "invariant": "Provider output exceeding the hard byte budget fails the run.",
-      "find": "            if output.len() > run.maximum_output_bytes {",
-      "replace": "            if false && output.len() > run.maximum_output_bytes {"
+      "find": "    if output.len() > run.maximum_output_bytes {",
+      "replace": "    if false && output.len() > run.maximum_output_bytes {"
+    },
+    {
+      "id": "reference-runtime-wall-deadline-ignored",
+      "file": "crates/hephaestus-runtime/src/deterministic.rs",
+      "invariant": "The deterministic runtime cannot report success after its monotonic wall deadline.",
+      "find": "fn deadline_reached(deadline: Instant) -> bool {\n    Instant::now() >= deadline\n}",
+      "replace": "fn deadline_reached(_deadline: Instant) -> bool {\n    false\n}"
     },
     {
       "id": "reference-runtime-running-resume-accepted",
@@ -822,8 +835,8 @@
       "id": "sandbox-checks-out-moving-head",
       "file": "crates/hephaestus-runtime/src/sandbox.rs",
       "invariant": "A sandbox materializes the revision pinned by its RunSpec rather than a moving branch.",
-      "find": "            .arg(spec.source_revision())\n            .output()?;",
-      "replace": "            .arg(\"HEAD\")\n            .output()?;"
+      "find": "                .arg(spec.source_revision())",
+      "replace": "                .arg(\"HEAD\")"
     },
     {
       "id": "sandbox-revision-binding-bypassed",
@@ -880,6 +893,293 @@
       "invariant": "A non-writing artifact preflight computes the same canonical BLAKE3 address as publication.",
       "find": "        Self(blake3::hash(bytes).to_hex().to_string())",
       "replace": "        Self(blake3::hash(b\"\").to_hex().to_string())"
+    },
+    {
+      "id": "arena-caller-controls-event-identity",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "An Arena event ID is derived from the evaluation identity rather than accepted from a caller.",
+      "find": "        if self.event_id != expected {",
+      "replace": "        if false && self.event_id != expected {"
+    },
+    {
+      "id": "arena-visible-manifest-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "The visible task manifest bytes exactly match the compiled World's content commitment.",
+      "find": "    verify_world_artifact(\n        world,\n        artifacts,\n        VISIBLE_MANIFEST_KEY,\n        &ArtifactId::for_bytes(&serde_json::to_vec(visible)?),\n    )?;",
+      "replace": ""
+    },
+    {
+      "id": "arena-evaluator-semantics-ignored",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "The World-bound evaluator bytes select the exact scoring semantics implemented by Arena.",
+      "find": "    if artifacts.get(&ArtifactId::parse(evaluator_id)?)? != EXACT_MATCH_EVALUATOR {",
+      "replace": "    if false && artifacts.get(&ArtifactId::parse(evaluator_id)?)? != EXACT_MATCH_EVALUATOR {"
+    },
+    {
+      "id": "arena-failed-run-scored",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Only successfully completed canonical runs may contribute Arena outputs.",
+      "find": "        if receipt.completion_reason != RunCompletionReason::Success {",
+      "replace": "        if false && receipt.completion_reason != RunCompletionReason::Success {"
+    },
+    {
+      "id": "arena-cross-world-run-scored",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every trial receipt belongs to the exact World being evaluated.",
+      "find": "        if receipt.world_id != binding.world_id {",
+      "replace": "        if false && receipt.world_id != binding.world_id {"
+    },
+    {
+      "id": "arena-mixed-genome-submission-accepted",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "All task trials in one submission derive from one immutable Genome.",
+      "find": "        if genome_id\n            .as_ref()\n            .is_some_and(|genome| genome != &receipt.genome_id)",
+      "replace": "        if false && genome_id\n            .as_ref()\n            .is_some_and(|genome| genome != &receipt.genome_id)"
+    },
+    {
+      "id": "arena-paired-revision-mismatch-accepted",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Parent and candidate trials for one task execute the same pinned source revision.",
+      "find": "        if parent.revisions[task_id] != candidate.revisions[task_id] {",
+      "replace": "        if false && parent.revisions[task_id] != candidate.revisions[task_id] {"
+    },
+    {
+      "id": "arena-run-result-reused-across-tasks",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "One canonical runtime result cannot be reused to satisfy multiple evaluation tasks.",
+      "find": "            if !run_events.insert(event_id.clone()) {",
+      "replace": "            if false && !run_events.insert(event_id.clone()) {"
+    },
+    {
+      "id": "arena-task-set-mismatch-accepted",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Each parent and candidate plan contains exactly the World-bound task set.",
+      "find": "    if plan.trials.keys().ne(expected_tasks.keys()) {",
+      "replace": "    if false && plan.trials.keys().ne(expected_tasks.keys()) {"
+    },
+    {
+      "id": "arena-runtime-output-evidence-discarded",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Arena scoring reads the hash-verified stdout artifact named by each canonical run receipt.",
+      "find": "        let stdout = verify_operator_artifact(artifacts, &receipt.stdout_artifact_id)?;",
+      "replace": "        let stdout = Vec::new();"
+    },
+    {
+      "id": "arena-public-summary-uses-sealed-score",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "The candidate-safe summary contains only visible-task scoring information.",
+      "find": "        candidate_visible_correct: aggregate.candidate_visible_correct,",
+      "replace": "        candidate_visible_correct: aggregate.candidate_sealed_correct,"
+    },
+    {
+      "id": "arena-evaluation-conflict-ignored",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "A reused evaluation identity with different canonical inputs fails before publication.",
+      "find": "            || !receipts_match_except_timestamp(&existing_receipt, &receipt)",
+      "replace": ""
+    },
+    {
+      "id": "arena-event-actor-forged",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Canonical evaluation events are authored only by the fixed Arena plane.",
+      "find": "const EVENT_ACTOR: &str = \"arena-plane\";",
+      "replace": "const EVENT_ACTOR: &str = \"caller\";"
+    },
+    {
+      "id": "runtime-experiment-input-unbound",
+      "file": "crates/hephaestus-runtime/src/spec.rs",
+      "invariant": "A runtime experiment context commits to the exact prompt bytes executed by the provider.",
+      "find": "        if experiment.input_commitment != blake3::hash(prompt.as_bytes()).to_hex().as_str() {",
+      "replace": "        if false && experiment.input_commitment != blake3::hash(prompt.as_bytes()).to_hex().as_str() {"
+    },
+    {
+      "id": "runtime-run-id-exceeds-receipt-contract",
+      "file": "crates/hephaestus-runtime/src/spec.rs",
+      "invariant": "Every accepted runtime run identity fits the signed result receipt schema.",
+      "find": "            || run_id.len() > MAX_RUN_ID_BYTES\n",
+      "replace": ""
+    },
+    {
+      "id": "sandbox-worktree-registration-leaked",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Sandbox creation rollback removes Git worktree metadata as well as filesystem state.",
+      "find": "    let git_failed = if git_cleanup_required {",
+      "replace": "    let git_failed = if false && git_cleanup_required {"
+    },
+    {
+      "id": "run-result-signature-unverified",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "Arena and replay accept only runtime results signed by the anchored daemon producer key.",
+      "find": "        self.key\n            .verify_strict(&message, &signature)\n            .map_err(|_| ExperienceError::InvalidInput(\"run result signature is invalid\"))?;",
+      "replace": "        let _ignored = (&message, &signature);"
+    },
+    {
+      "id": "run-result-task-context-forgotten",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "The canonical result copies its task identity from the executed RunSpec.",
+      "find": "            task_id: spec.experiment().task_id().to_owned(),",
+      "replace": "            task_id: spec.run_id().to_owned(),"
+    },
+    {
+      "id": "run-result-budget-context-forgotten",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "The canonical result records the complete hard wall budget from the executed RunSpec.",
+      "find": "                wall_millis,",
+      "replace": "                wall_millis: 1,"
+    },
+    {
+      "id": "control-missing-producer-key-regenerated",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A daemon with canonical results or a registered World verifier never silently replaces a missing producer signing key.",
+      "find": "            !has_run_results && anchored_verifier.is_none(),",
+      "replace": "            true,"
+    },
+    {
+      "id": "control-evaluation-task-context-hardcoded",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Evaluation receipts commit to the exact task supplied to the daemon command.",
+      "find": "        let experiment = ExperimentContext::new(task_id, prompt.as_bytes(), seed, environment_id)",
+      "replace": "        let experiment = ExperimentContext::new(\"repository-inventory-v1\", prompt.as_bytes(), seed, environment_id)"
+    },
+    {
+      "id": "control-evaluation-environment-arch-forgotten",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The runtime-owned environment fingerprint binds the host architecture.",
+      "find": "        std::env::consts::ARCH",
+      "replace": "        \"unknown-arch\""
+    },
+    {
+      "id": "control-legacy-unsigned-history-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Legacy unsigned run-result history fails with an actionable backup-and-reinitialize incompatibility.",
+      "find": "        reject_legacy_run_result_history(&history)?;",
+      "replace": ""
+    },
+    {
+      "id": "control-world-verifier-mismatch-accepted",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "A registered World verifier prevents a replaced daemon producer key from starting even before the first result.",
+      "find": "        if anchored_verifier\n            .as_ref()\n            .is_some_and(|key| key != &run_result_verifier.public_key_bytes())",
+      "replace": "        if false && anchored_verifier\n            .as_ref()\n            .is_some_and(|key| key != &run_result_verifier.public_key_bytes())"
+    },
+    {
+      "id": "control-evaluation-cost-ceiling-unbounded",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The daemon rejects an evaluation cost ceiling above its bounded protocol limit before creating a sandbox.",
+      "find": "        || maximum_cost_microusd > MAX_EVALUATION_COST_MICROUSD",
+      "replace": ""
+    },
+    {
+      "id": "control-successful-sandbox-cleanup-skipped",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "The control cleanup guard removes a successful sandbox before returning its result.",
+      "find": "        let sandbox = self.sandbox.take().ok_or(ExecuteError::Internal)?;\n        sandbox.cleanup().map_err(|_| ExecuteError::Internal)",
+      "replace": "        self.sandbox.take();\n        Ok(())"
+    },
+    {
+      "id": "control-world-cost-law-bypassed",
+      "file": "crates/hephaestus-control/src/server.rs",
+      "invariant": "Every evaluation cost ceiling is no greater than the immutable registered World Law.",
+      "find": "        if maximum_cost_microusd > world_cost_ceiling {\n            return Err(ExecuteError::Invalid(\n                \"evaluation cost exceeds registered World Law\",\n            ));\n        }",
+      "replace": "        if false && maximum_cost_microusd > world_cost_ceiling {\n            return Err(ExecuteError::Invalid(\n                \"evaluation cost exceeds registered World Law\",\n            ));\n        }"
+    },
+    {
+      "id": "run-result-latency-shared-limit-bypassed",
+      "file": "crates/hephaestus-experience/src/run_result.rs",
+      "invariant": "Canonical result latency accepts long evaluations through the shared runtime limit and rejects values above it.",
+      "find": "        if self.latency_millis > MAX_RUN_LATENCY_MILLIS {",
+      "replace": "        if false && self.latency_millis > MAX_RUN_LATENCY_MILLIS {"
+    },
+    {
+      "id": "mutation-descendant-sigkill-skipped",
+      "file": "checks/mutation_guard.py",
+      "invariant": "Mutation timeouts escalate to SIGKILL for silent TERM-ignoring descendants before source restoration.",
+      "find": "    _signal_process_group(group_id, signal.SIGKILL)",
+      "replace": "    _signal_process_group(group_id, signal.SIGTERM)"
+    },
+    {
+      "id": "mutation-cli-command-override-ignored",
+      "file": "checks/mutation_guard.py",
+      "invariant": "An explicit mutation --test-cmd overrides every scoped manifest command.",
+      "find": "    if not allow_scoped:\n        return default",
+      "replace": "    if False and not allow_scoped:\n        return default"
+    },
+    {
+      "id": "mutation-process-inspection-failure-hidden",
+      "file": "checks/mutation_guard.py",
+      "invariant": "A failed process-group inspection is unknown cleanup state, never proof that descendants are gone.",
+      "find": "    if result.returncode != 0:\n        raise ProcessCleanupError(\n            f\"process-group inspection failed with exit {result.returncode}\"\n        )",
+      "replace": "    if False and result.returncode != 0:\n        raise ProcessCleanupError(\n            f\"process-group inspection failed with exit {result.returncode}\"\n        )"
+    },
+    {
+      "id": "arena-task-claim-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every signed result names the exact evaluator task slot it satisfies.",
+      "find": "        if receipt.task_id != *task_id\n            || ",
+      "replace": "        if "
+    },
+    {
+      "id": "arena-input-commitment-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every signed result commits to the exact World-bound task input bytes.",
+      "find": "            || receipt.input_commitment != expected_tasks[task_id]\n",
+      "replace": ""
+    },
+    {
+      "id": "arena-seed-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every paired trial uses the exact evaluation seed.",
+      "find": "            || receipt.seed != binding.seed\n",
+      "replace": ""
+    },
+    {
+      "id": "arena-environment-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every paired trial uses the exact evaluation environment identity.",
+      "find": "            || receipt.environment_id != binding.environment_id\n",
+      "replace": ""
+    },
+    {
+      "id": "arena-budget-unbound",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Every paired trial uses the exact complete hard budget tuple.",
+      "find": "            || receipt.budget != binding.budget",
+      "replace": ""
+    },
+    {
+      "id": "failed-sandbox-materialization-leaked",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "A failed Git materialization removes the private run directory before returning.",
+      "find": "        Ok(_) => fs::remove_dir_all(run_root).is_err(),",
+      "replace": "        Ok(_) => false,"
+    },
+    {
+      "id": "sandbox-token-expiry-overflow-panics",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "An unrepresentable token expiry fails normally and rolls back its worktree instead of panicking.",
+      "find": "                .checked_add(self.token_ttl)",
+      "replace": "                .checked_add(Duration::ZERO)"
+    },
+    {
+      "id": "sandbox-root-replacement-accepted",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Sandbox creation rejects a root path whose directory identity changed after the manager opened it.",
+      "find": "        self.validate_root()?;",
+      "replace": ""
+    },
+    {
+      "id": "sandbox-rollback-failure-hidden",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Sandbox creation reports when compensating cleanup cannot restore every invariant.",
+      "find": "            Err(failures) => failures.into_rollback_error(operation),",
+      "replace": "            Err(_) => operation,"
+    },
+    {
+      "id": "sandbox-git-cleanup-failure-hidden",
+      "file": "crates/hephaestus-runtime/src/sandbox.rs",
+      "invariant": "Sandbox cleanup reports a Git metadata cleanup failure even when filesystem removal succeeds.",
+      "find": "    if git_failed || filesystem_failed {",
+      "replace": "    if filesystem_failed {"
     }
   ]
 }

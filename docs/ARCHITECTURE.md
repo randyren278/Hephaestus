@@ -33,6 +33,12 @@ flowchart TD
     Runtime --> Recorded[Evidence-required runtime wrapper]
     Recorded --> Experience[Redacted provenance-bound traces]
     Experience --> Event
+    Event --> Arena[Runtime-provenance Arena]
+    World --> Arena
+    Daemon --> Signed[Signed run results]
+    Signed --> Event
+    World --> Verifier[Producer public key]
+    Verifier --> Arena
     Runtime --> Sandbox[Pinned private Git worktree]
     Sandbox --> Codex[Codex driver]
     Sandbox --> Claude[Claude driver]
@@ -41,12 +47,13 @@ flowchart TD
 
 ## Trust boundary
 
-The authority, domain, compiler, Genome, World, event-store, artifact-store, runtime, isolation, control, and Experience modules named by `checks/checks.json` are production-critical. The manifest sets a 95% per-module coverage floor and deliberate source mutations for implemented invariants. The mutation ratchet may only increase.
+The authority, domain, compiler, Genome, World, event-store, artifact-store, runtime, isolation, control, and Experience modules named by `checks/checks.json` are production-critical. The manifest sets a 95% per-module coverage floor and deliberate source mutations for implemented invariants. Mutation commands and timeouts resolve by longest file-prefix match, while an explicit CLI test command overrides every scoped command. Each suite runs in a fresh process group; timeout or interruption terminates and waits for descendants before byte-exact source restoration. The mutation ratchet may only increase.
 
 ## Repository map
 
 - `crates/hephaestus-core/` — shared trust primitives.
 - `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
+- `crates/hephaestus-arena/` — World-bound deterministic paired measurement with sealed receipts.
 - `crates/hephaestus-experience/` — redacted traces, runtime evidence integration, and provenance-backed experience.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.

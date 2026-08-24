@@ -34,6 +34,7 @@ struct ReferenceRun {
     source_revision: String,
     prompt_hash: String,
     started: Instant,
+    deadline: Instant,
     elapsed: Duration,
     observations: Vec<RuntimeObservation>,
 }
@@ -111,34 +112,30 @@ impl RuntimeAdapter for DeterministicRuntime {
             .get_mut(run_id)
             .ok_or(RuntimeError::InvalidSpec("run does not exist"))?;
         if run.status == RunStatus::Running {
-            let (output, files) = inventory(run)?;
-            run.observations.extend(files.iter().map(|file| {
-                RuntimeObservation::new(
-                    RuntimeObservationKind::FileRead,
+            if let Some((output, files)) = inventory(run)? {
+                run.observations.extend(files.iter().map(|file| {
+                    RuntimeObservation::new(
+                        RuntimeObservationKind::FileRead,
+                        BTreeMap::from([
+                            ("path".to_owned(), file.path.clone()),
+                            ("bytes".to_owned(), file.bytes.to_string()),
+                            ("blake3".to_owned(), file.blake3.clone()),
+                        ]),
+                    )
+                }));
+                run.observations.push(RuntimeObservation::new(
+                    RuntimeObservationKind::ModelResponse,
                     BTreeMap::from([
-                        ("path".to_owned(), file.path.clone()),
-                        ("bytes".to_owned(), file.bytes.to_string()),
-                        ("blake3".to_owned(), file.blake3.clone()),
+                        ("output_bytes".to_owned(), output.len().to_string()),
+                        (
+                            "output_hash".to_owned(),
+                            blake3::hash(&output).to_hex().to_string(),
+                        ),
                     ]),
-                )
-            }));
-            run.observations.push(RuntimeObservation::new(
-                RuntimeObservationKind::ModelResponse,
-                BTreeMap::from([
-                    ("output_bytes".to_owned(), output.len().to_string()),
-                    (
-                        "output_hash".to_owned(),
-                        blake3::hash(&output).to_hex().to_string(),
-                    ),
-                ]),
-            ));
-            if output.len() > run.maximum_output_bytes {
-                run.status = RunStatus::Failed;
-                fs::write(&run.stderr_path, b"output budget exceeded\n")?;
+                ));
+                persist_terminal_output(run, &output)?;
             } else {
-                fs::write(&run.stdout_path, output)?;
-                fs::write(&run.stderr_path, [])?;
-                run.status = RunStatus::Succeeded;
+                mark_wall_budget_exceeded(run)?;
             }
             run.elapsed = run.started.elapsed();
         }
@@ -193,6 +190,10 @@ fn reference_run(
         .authority
         .derive_child(spec.capabilities())
         .map_err(|_| RuntimeError::CapabilityDenied)?;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(spec.budget().wall())
+        .ok_or(RuntimeError::InvalidSpec("wall budget exceeds clock range"))?;
     Ok(ReferenceRun {
         worktree: sandbox.worktree().to_owned(),
         stdout_path: sandbox.execution_dir().join("stdout.json"),
@@ -205,7 +206,8 @@ fn reference_run(
         world_id: spec.world_id().to_owned(),
         source_revision: spec.source_revision().to_owned(),
         prompt_hash: blake3::hash(spec.prompt().as_bytes()).to_hex().to_string(),
-        started: Instant::now(),
+        started,
+        deadline,
         elapsed: Duration::ZERO,
         observations: vec![RuntimeObservation::new(
             RuntimeObservationKind::ContextComposed,
@@ -238,12 +240,21 @@ struct FileRecord {
     blake3: String,
 }
 
-fn inventory(run: &ReferenceRun) -> Result<(Vec<u8>, Vec<FileRecord>), RuntimeError> {
+type InventoryResult = (Vec<u8>, Vec<FileRecord>);
+
+fn inventory(run: &ReferenceRun) -> Result<Option<InventoryResult>, RuntimeError> {
+    if deadline_reached(run.deadline) {
+        return Ok(None);
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(&run.worktree)
         .args(["ls-files", "-z"])
-        .output()?;
+        .output();
+    if deadline_reached(run.deadline) {
+        return Ok(None);
+    }
+    let output = output?;
     if !output.status.success() {
         return Err(RuntimeError::Git(
             "tracked-file inventory failed".to_owned(),
@@ -255,14 +266,25 @@ fn inventory(run: &ReferenceRun) -> Result<(Vec<u8>, Vec<FileRecord>), RuntimeEr
         .split(|byte| *byte == 0)
         .filter(|raw| !raw.is_empty())
     {
+        if deadline_reached(run.deadline) {
+            return Ok(None);
+        }
         let relative = std::str::from_utf8(raw)
             .map_err(|_| RuntimeError::InvalidSpec("repository path is not UTF-8"))?;
         let path = safe_tracked_path(&run.worktree, relative)?;
-        let metadata = fs::symlink_metadata(&path)?;
+        let metadata = fs::symlink_metadata(&path);
+        if deadline_reached(run.deadline) {
+            return Ok(None);
+        }
+        let metadata = metadata?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(path);
+        if deadline_reached(run.deadline) {
+            return Ok(None);
+        }
+        let bytes = bytes?;
         files.push(FileRecord {
             path: relative.to_owned(),
             bytes: metadata.len(),
@@ -279,7 +301,54 @@ fn inventory(run: &ReferenceRun) -> Result<(Vec<u8>, Vec<FileRecord>), RuntimeEr
         files: files.clone(),
     })
     .map_err(|_| RuntimeError::InvalidSpec("inventory serialization failed"))?;
-    Ok((output, files))
+    if deadline_reached(run.deadline) {
+        return Ok(None);
+    }
+    Ok(Some((output, files)))
+}
+
+fn persist_terminal_output(run: &mut ReferenceRun, output: &[u8]) -> Result<(), RuntimeError> {
+    if deadline_reached(run.deadline) {
+        return mark_wall_budget_exceeded(run);
+    }
+    if output.len() > run.maximum_output_bytes {
+        let stdout = fs::write(&run.stdout_path, []);
+        if deadline_reached(run.deadline) {
+            return mark_wall_budget_exceeded(run);
+        }
+        stdout?;
+        let stderr = fs::write(&run.stderr_path, b"output budget exceeded\n");
+        if deadline_reached(run.deadline) {
+            return mark_wall_budget_exceeded(run);
+        }
+        stderr?;
+        run.status = RunStatus::Failed;
+    } else {
+        let stdout = fs::write(&run.stdout_path, output);
+        if deadline_reached(run.deadline) {
+            return mark_wall_budget_exceeded(run);
+        }
+        stdout?;
+        let stderr = fs::write(&run.stderr_path, []);
+        if deadline_reached(run.deadline) {
+            return mark_wall_budget_exceeded(run);
+        }
+        stderr?;
+        run.status = RunStatus::Succeeded;
+    }
+    Ok(())
+}
+
+fn mark_wall_budget_exceeded(run: &mut ReferenceRun) -> Result<(), RuntimeError> {
+    run.status = RunStatus::TimedOut;
+    run.elapsed = run.started.elapsed();
+    fs::write(&run.stdout_path, [])?;
+    fs::write(&run.stderr_path, b"wall budget exceeded\n")?;
+    Ok(())
+}
+
+fn deadline_reached(deadline: Instant) -> bool {
+    Instant::now() >= deadline
 }
 
 fn safe_tracked_path(root: &Path, relative: &str) -> Result<PathBuf, RuntimeError> {

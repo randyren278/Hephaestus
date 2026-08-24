@@ -4,6 +4,68 @@ use hephaestus_core::authority::CapabilitySet;
 
 use crate::RuntimeError;
 
+const MAX_CONTEXT_ID_BYTES: usize = 128;
+const MAX_RUN_ID_BYTES: usize = 128;
+const REFERENCE_ENVIRONMENT_ID: &str = "reference-runtime-v1";
+
+/// Runtime-owned experiment coordinates that make paired trials comparable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExperimentContext {
+    task_id: String,
+    input_commitment: String,
+    seed: u64,
+    environment_id: String,
+}
+
+impl ExperimentContext {
+    /// Creates a bounded context and commits to the exact task input bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed task or environment identities.
+    pub fn new(
+        task_id: impl Into<String>,
+        input: impl AsRef<[u8]>,
+        seed: u64,
+        environment_id: impl Into<String>,
+    ) -> Result<Self, RuntimeError> {
+        let task_id = task_id.into();
+        let environment_id = environment_id.into();
+        validate_context_id(&task_id, "task_id is invalid")?;
+        validate_context_id(&environment_id, "environment_id is invalid")?;
+        Ok(Self {
+            task_id,
+            input_commitment: blake3::hash(input.as_ref()).to_hex().to_string(),
+            seed,
+            environment_id,
+        })
+    }
+
+    /// Stable task identity shared by paired trials.
+    #[must_use]
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// BLAKE3 commitment to the exact provider input bytes.
+    #[must_use]
+    pub fn input_commitment(&self) -> &str {
+        &self.input_commitment
+    }
+
+    /// Runtime-owned deterministic seed.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Exact execution environment identity.
+    #[must_use]
+    pub fn environment_id(&self) -> &str {
+        &self.environment_id
+    }
+}
+
 /// Hard per-run resource budget enforced by the supervisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budget {
@@ -66,6 +128,7 @@ pub struct RunSpec {
     prompt: String,
     capabilities: CapabilitySet,
     budget: Budget,
+    experiment: ExperimentContext,
 }
 
 impl RunSpec {
@@ -84,7 +147,11 @@ impl RunSpec {
         capabilities: CapabilitySet,
         budget: Budget,
     ) -> Result<Self, RuntimeError> {
-        Self::new_at_revision(
+        let run_id = run_id.into();
+        let prompt = prompt.into();
+        let experiment =
+            ExperimentContext::new(&run_id, prompt.as_bytes(), 0, REFERENCE_ENVIRONMENT_ID)?;
+        Self::new_for_experiment_at_revision(
             run_id,
             genome_id,
             world_id,
@@ -93,6 +160,7 @@ impl RunSpec {
             prompt,
             capabilities,
             budget,
+            experiment,
         )
     }
 
@@ -117,7 +185,73 @@ impl RunSpec {
         budget: Budget,
     ) -> Result<Self, RuntimeError> {
         let run_id = run_id.into();
+        let prompt = prompt.into();
+        let experiment =
+            ExperimentContext::new(&run_id, prompt.as_bytes(), 0, REFERENCE_ENVIRONMENT_ID)?;
+        Self::new_for_experiment_at_revision(
+            run_id,
+            genome_id,
+            world_id,
+            source_repository,
+            source_revision,
+            prompt,
+            capabilities,
+            budget,
+            experiment,
+        )
+    }
+
+    /// Creates a run with explicit runtime-owned experiment coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same validation as [`Self::new`] and requires the context's
+    /// input commitment to match the exact prompt bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_experiment(
+        run_id: impl Into<String>,
+        genome_id: impl Into<String>,
+        world_id: impl Into<String>,
+        source_repository: impl Into<PathBuf>,
+        prompt: impl Into<String>,
+        capabilities: CapabilitySet,
+        budget: Budget,
+        experiment: ExperimentContext,
+    ) -> Result<Self, RuntimeError> {
+        Self::new_for_experiment_at_revision(
+            run_id,
+            genome_id,
+            world_id,
+            source_repository,
+            "HEAD",
+            prompt,
+            capabilities,
+            budget,
+            experiment,
+        )
+    }
+
+    /// Creates a revision-pinned run with explicit experiment coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid run fields, revisions, or a context committed to input
+    /// bytes different from the provider prompt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_experiment_at_revision(
+        run_id: impl Into<String>,
+        genome_id: impl Into<String>,
+        world_id: impl Into<String>,
+        source_repository: impl Into<PathBuf>,
+        source_revision: impl AsRef<str>,
+        prompt: impl Into<String>,
+        capabilities: CapabilitySet,
+        budget: Budget,
+        experiment: ExperimentContext,
+    ) -> Result<Self, RuntimeError> {
+        let run_id = run_id.into();
         if run_id.is_empty()
+            || run_id.len() > MAX_RUN_ID_BYTES
             || !run_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -130,6 +264,11 @@ impl RunSpec {
         if genome_id.trim().is_empty() || world_id.trim().is_empty() || prompt.trim().is_empty() {
             return Err(RuntimeError::InvalidSpec(
                 "Genome, World, and prompt are required",
+            ));
+        }
+        if experiment.input_commitment != blake3::hash(prompt.as_bytes()).to_hex().as_str() {
+            return Err(RuntimeError::InvalidSpec(
+                "experiment input commitment does not match prompt",
             ));
         }
         let source_repository = source_repository.into();
@@ -148,6 +287,7 @@ impl RunSpec {
             prompt,
             capabilities,
             budget,
+            experiment,
         })
     }
 
@@ -198,6 +338,24 @@ impl RunSpec {
     pub const fn budget(&self) -> Budget {
         self.budget
     }
+
+    /// Runtime-owned task, input, seed, and environment coordinates.
+    #[must_use]
+    pub const fn experiment(&self) -> &ExperimentContext {
+        &self.experiment
+    }
+}
+
+fn validate_context_id(value: &str, error: &'static str) -> Result<(), RuntimeError> {
+    if value.is_empty()
+        || value.len() > MAX_CONTEXT_ID_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err(RuntimeError::InvalidSpec(error));
+    }
+    Ok(())
 }
 
 fn resolve_commit(repository: &std::path::Path, revision: &str) -> Result<String, RuntimeError> {

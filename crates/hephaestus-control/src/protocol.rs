@@ -40,6 +40,23 @@ pub enum Command {
         /// Content-derived registered Genome identity.
         genome_id: String,
     },
+    /// Execute one World-bound task with daemon-owned runtime provenance.
+    RunEvaluation {
+        /// Content-derived registered Genome identity.
+        genome_id: String,
+        /// Exact World task identity.
+        task_id: String,
+        /// Exact provider input committed by the runtime.
+        input: String,
+        /// Deterministic evaluation seed.
+        seed: u64,
+        /// Hard wall deadline in milliseconds.
+        wall_millis: u64,
+        /// Maximum combined output bytes.
+        maximum_output_bytes: u64,
+        /// Maximum provider spend in micro-US dollars.
+        maximum_cost_microusd: u64,
+    },
     /// Verify and replay canonical history into a fresh projection.
     Replay,
     /// Stop the local daemon after acknowledging the audited request.

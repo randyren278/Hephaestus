@@ -1,5 +1,6 @@
 use std::{error::Error, fmt};
 
+use hephaestus_experience::ExperienceError;
 use hephaestus_ledger::LedgerError;
 
 /// Fail-closed evaluation and persistence errors.
@@ -9,20 +10,48 @@ pub enum ArenaError {
     InvalidId { field: &'static str, value: String },
     /// A task identifier occurs more than once.
     DuplicateTaskId(String),
+    /// One runtime result is reused for more than one evaluation task.
+    DuplicateRunEvent(String),
     /// A manifest has no tasks.
     EmptyManifest,
-    /// A manifest exceeds the receipt counter range.
+    /// A manifest, evaluation, or submission exceeds the bounded task count.
     TooManyTasks,
+    /// A task or submission contains text exceeding the evaluator boundary.
+    TextTooLarge { field: &'static str, limit: usize },
     /// The visible and sealed manifests use the same identity.
     DuplicateManifestId(String),
-    /// Parent and candidate submissions use the same identity.
-    DuplicateSubmissionId(String),
+    /// Parent and candidate resolve to the same immutable Genome.
+    DuplicateGenomeId(String),
     /// Provenance differs between an input and the evaluator binding.
     BindingMismatch(&'static str),
+    /// A required evaluator artifact is absent from the compiled World.
+    MissingWorldArtifact(&'static str),
+    /// World-bound evaluator evidence does not match the supplied canonical bytes.
+    WorldArtifactMismatch(&'static str),
+    /// The configured evaluator does not implement the scoring semantics used here.
+    UnsupportedEvaluator,
     /// A manifest was supplied in the wrong visibility slot.
     VisibilityMismatch,
     /// A submission is missing or adds task identifiers.
     TaskSetMismatch { submission_id: String },
+    /// A referenced canonical runtime result event does not exist.
+    UnknownRunEvent(String),
+    /// A runtime receipt failed its canonical envelope or schema validation.
+    RunReceipt(ExperienceError),
+    /// A trial did not terminate successfully.
+    RunNotSuccessful(String),
+    /// A trial ran under a different compiled World.
+    RunWorldMismatch(String),
+    /// One submission mixes trials from different immutable Genomes.
+    MixedSubmissionGenome,
+    /// Paired trials did not execute the same source revision.
+    SourceRevisionMismatch(String),
+    /// A runtime stdout artifact is not bounded UTF-8 evaluator input.
+    InvalidRunOutput(String),
+    /// An existing deterministic evaluation identity has different canonical contents.
+    EvaluationConflict(String),
+    /// A stored operator receipt is malformed or inconsistent with its ledger metadata.
+    InvalidStoredReceipt(&'static str),
     /// Durable evidence storage failed.
     Ledger(LedgerError),
     /// Canonical JSON encoding failed.
@@ -39,6 +68,7 @@ impl Error for ArenaError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
+            Self::RunReceipt(error) => Some(error),
             Self::Serialization(error) => Some(error),
             _ => None,
         }
@@ -54,5 +84,11 @@ impl From<LedgerError> for ArenaError {
 impl From<serde_json::Error> for ArenaError {
     fn from(error: serde_json::Error) -> Self {
         Self::Serialization(error)
+    }
+}
+
+impl From<ExperienceError> for ArenaError {
+    fn from(error: ExperienceError) -> Self {
+        Self::RunReceipt(error)
     }
 }

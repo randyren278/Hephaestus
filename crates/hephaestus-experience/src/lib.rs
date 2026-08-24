@@ -15,4 +15,7 @@ pub use record::{
 };
 pub use recorder::{EvidenceRecorder, RetentionLimits};
 pub use redaction::RedactionPolicy;
-pub use run_result::{RUN_RESULT_SCHEMA_VERSION, RunCompletionReason, RunResultReceipt};
+pub use run_result::{
+    RUN_RESULT_SCHEMA_VERSION, RunBudgetReceipt, RunCompletionReason, RunResultReceipt,
+    RunResultSigner, RunResultVerifier,
+};

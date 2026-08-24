@@ -18,5 +18,5 @@ pub use runtime::{
     RuntimeAdapter, RuntimeObservation, RuntimeObservationKind,
 };
 pub use sandbox::{CapabilityToken, Sandbox, SandboxManager};
-pub use spec::{Budget, RunSpec};
+pub use spec::{Budget, ExperimentContext, RunSpec};
 pub use supervisor::SupervisedRuntime;

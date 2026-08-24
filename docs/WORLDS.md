@@ -8,6 +8,8 @@ The schema 1 compiler rejects candidate evaluator access, mutation scopes contai
 
 Evaluator artifacts are verified through the same content-addressed store used by Genomes. Candidates receive identities and policy outcomes, never evaluator bytes or hidden scoring internals.
 
+The current measurement Arena reserves four evaluator artifact names in a compiled World: `arena.visible_manifest`, `arena.sealed_manifest`, `arena.evaluator`, and `arena.runtime_verifier`. It hashes the supplied canonical manifest bytes before any publication and requires each hash to equal the corresponding World commitment. The verifier artifact contains the 32-byte Ed25519 public key authorized to attest runtime results; the signing seed remains daemon-only. The only implemented evaluator payload is `exact-match-evaluator-v1`; any other evaluator bytes fail closed until their semantics have an independently tested implementation.
+
 ```mermaid
 flowchart LR
     Laws --> Canonical[Canonical World]

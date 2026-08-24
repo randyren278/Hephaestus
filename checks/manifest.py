@@ -11,6 +11,8 @@ Schema:
 
     test_command: "python -m pytest -q -x"   # optional, --test-cmd overrides
     timeout_seconds: 120                      # optional
+    mutation_timeout_seconds:                 # optional, longest prefix wins
+      "crates/slow-package/": 240
     coverage_floor: 95.0                      # optional, --floor overrides
     critical_modules:                         # optional (coverage_gate only)
       - src/auth.ts

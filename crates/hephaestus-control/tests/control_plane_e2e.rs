@@ -9,16 +9,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hephaestus_arena::{
+    EvaluationBinding, EvaluationInputs, EvaluationStores, ReceiptContext, TrialPlan,
+    TrustedManifest, TrustedTask, Visibility, evaluate_and_record,
+};
 use hephaestus_control::{
     API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, ControlPlane,
     GenomeRecord, ResponseData, RunCompletionReason, WorldRecord,
 };
-use hephaestus_genome::{SourceFormat, compile_genome, compile_world};
+use hephaestus_experience::{
+    RUN_RESULT_SCHEMA_VERSION, RunBudgetReceipt, RunResultReceipt, RunResultSigner,
+};
+use hephaestus_genome::{CompiledWorld, SourceFormat, compile_genome, compile_world};
 use hephaestus_ledger::{ArtifactStore, EventInput, EventStore};
 use tempfile::tempdir;
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_hephaestusd");
 const CLI: &str = env!("CARGO_BIN_EXE_hephaestus");
+
+fn runtime_environment_id() -> String {
+    format!(
+        "deterministic-v1.runtime-{}.receipt-schema-{}.{}.{}.isolation-private-worktree-v1.backend-git",
+        env!("CARGO_PKG_VERSION"),
+        RUN_RESULT_SCHEMA_VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
 
 struct Daemon {
     child: Child,
@@ -74,6 +91,263 @@ impl Daemon {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn daemon_evaluation_results_replay_and_feed_exact_authenticated_arena_events() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("data");
+    let repository = directory.path().join("source");
+    fs::create_dir_all(&repository).unwrap();
+    git(&repository, &["init"]);
+    git(&repository, &["config", "user.name", "Hephaestus Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "hephaestus@example.invalid"],
+    );
+    fs::write(repository.join("fixture.txt"), b"paired daemon fixture\n").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let producer_seed = [17_u8; 32];
+    fs::write(data_dir.join("runtime-producer.key"), producer_seed).unwrap();
+    fs::set_permissions(
+        data_dir.join("runtime-producer.key"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let signer = RunResultSigner::from_seed(producer_seed);
+    let artifacts = ArtifactStore::open(data_dir.join("blobs")).unwrap();
+    let visible = TrustedManifest::new(
+        "visible-v1",
+        Visibility::Visible,
+        vec![TrustedTask::new("visible-task", "visible input", "not inventory").unwrap()],
+    )
+    .unwrap();
+    let sealed = TrustedManifest::new(
+        "sealed-v1",
+        Visibility::Sealed,
+        vec![TrustedTask::new("sealed-task", "sealed input", "not inventory").unwrap()],
+    )
+    .unwrap();
+    let visible_id = artifacts
+        .put(&serde_json::to_vec(&visible).unwrap())
+        .unwrap();
+    let sealed_id = artifacts
+        .put(&serde_json::to_vec(&sealed).unwrap())
+        .unwrap();
+    let evaluator_id = artifacts.put(b"exact-match-evaluator-v1").unwrap();
+    let verifier_id = artifacts
+        .put(&signer.verifier().public_key_bytes())
+        .unwrap();
+    let world_source = format!(
+        r#"{{"schema_version":1,"name":"daemon-arena","laws":{{"candidate_network":false,"candidate_evaluator_access":false,"maximum_cost_microusd":0}},"authority_ceiling":{{"workspace_write":false,"network":false}},"mutation_scope":[],"promotion":{{"minimum_delta_bps":0,"maximum_regressions":0,"confidence_bps":9500}},"objectives":["correctness"],"evaluator_artifacts":{{"arena.visible_manifest":"{}","arena.sealed_manifest":"{}","arena.evaluator":"{}","arena.runtime_verifier":"{}"}}}}"#,
+        visible_id.as_str(),
+        sealed_id.as_str(),
+        evaluator_id.as_str(),
+        verifier_id.as_str()
+    );
+    let world = compile_world(&world_source, SourceFormat::Json, &artifacts).unwrap();
+    let world_artifact = artifacts.put(world.canonical_json()).unwrap();
+    let world_record = WorldRecord {
+        world_id: world.id().to_owned(),
+        name: world.name().to_owned(),
+        artifact_id: world_artifact.as_str().to_owned(),
+    };
+    let parent = compiled_genome_record("daemon-parent", &world, &artifacts);
+    let candidate = compiled_genome_record("daemon-candidate", &world, &artifacts);
+    let mut ledger = EventStore::open(data_dir.join("events.sqlite3")).unwrap();
+    ledger
+        .append(EventInput::new(
+            "daemon-arena-world",
+            &world_record.world_id,
+            "world.registered",
+            "test-fixture",
+            1,
+            serde_json::to_vec(&world_record).unwrap(),
+        ))
+        .unwrap();
+    for (sequence, genome) in [(2, &parent), (3, &candidate)] {
+        ledger
+            .append(EventInput::new(
+                format!("genome-{sequence}"),
+                &genome.genome_id,
+                "genome.registered",
+                "test-fixture",
+                sequence,
+                serde_json::to_vec(genome).unwrap(),
+            ))
+            .unwrap();
+    }
+    drop(ledger);
+
+    let producer_key_path = data_dir.join("runtime-producer.key");
+    fs::remove_file(&producer_key_path).unwrap();
+    let missing_key_error = ControlPlane::open_with_repository(&data_dir, &repository)
+        .err()
+        .expect("an anchored World must reject a missing producer key");
+    assert!(format!("{missing_key_error}").contains("registered World verifier"));
+    assert!(!producer_key_path.exists());
+
+    fs::write(&producer_key_path, [18_u8; 32]).unwrap();
+    fs::set_permissions(&producer_key_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let replaced_key_error = ControlPlane::open_with_repository(&data_dir, &repository)
+        .err()
+        .expect("an anchored World must reject a replaced producer key");
+    assert!(format!("{replaced_key_error}").contains("does not match registered World verifier"));
+    fs::write(&producer_key_path, producer_seed).unwrap();
+    fs::set_permissions(&producer_key_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let daemon = Daemon::start_with_repository(&data_dir, &repository);
+    assert!(cli(&data_dir, &["unfreeze"]).status.success());
+    let invalid_budget = cli(
+        &data_dir,
+        &[
+            "evaluate",
+            &parent.genome_id,
+            "--task-id",
+            "visible-task",
+            "--input",
+            "visible input",
+            "--wall-millis",
+            "10000",
+            "--maximum-output-bytes",
+            "1048576",
+            "--maximum-cost-microusd",
+            "1000000001",
+        ],
+    );
+    assert!(!invalid_budget.status.success());
+    assert_eq!(
+        serde_json::from_slice::<ApiResponse>(&invalid_budget.stdout)
+            .expect("decode invalid evaluation budget response")
+            .error
+            .expect("invalid evaluation budget error")
+            .code,
+        ApiErrorCode::InvalidRequest
+    );
+    let budget_history = EventStore::open(data_dir.join("events.sqlite3"))
+        .unwrap()
+        .replay_verified()
+        .unwrap();
+    assert!(
+        !budget_history
+            .iter()
+            .any(|event| event.event_type == "run.result_recorded")
+    );
+    let sandbox_root = data_dir.join("sandboxes");
+    assert!(!sandbox_root.exists() || fs::read_dir(sandbox_root).unwrap().next().is_none());
+    let mut parent_trials = Vec::new();
+    let mut candidate_trials = Vec::new();
+    for (task, input) in [
+        ("visible-task", "visible input"),
+        ("sealed-task", "sealed input"),
+    ] {
+        parent_trials.push((
+            task.to_owned(),
+            evaluation_run(&data_dir, &parent.genome_id, task, input),
+        ));
+        candidate_trials.push((
+            task.to_owned(),
+            evaluation_run(&data_dir, &candidate.genome_id, task, input),
+        ));
+    }
+    daemon.stop();
+    let restarted = Daemon::start_with_repository(&data_dir, &repository);
+    assert!(cli(&data_dir, &["replay"]).status.success());
+    restarted.stop();
+
+    let binding = EvaluationBinding::new(
+        world.id(),
+        42,
+        runtime_environment_id(),
+        evaluator_id.as_str(),
+        RunBudgetReceipt {
+            wall_millis: 10_000,
+            maximum_output_bytes: 1_048_576,
+            maximum_cost_microusd: 0,
+        },
+    )
+    .unwrap();
+    let parent_plan = TrialPlan::new(parent_trials).unwrap();
+    let candidate_plan = TrialPlan::new(candidate_trials).unwrap();
+    let recorded = evaluate_and_record(
+        EvaluationStores::open(data_dir.join("events.sqlite3"), data_dir.join("blobs")).unwrap(),
+        ReceiptContext {
+            event_id: "arena:evaluation:daemon-paired:recorded".to_owned(),
+            evaluation_id: "daemon-paired".to_owned(),
+            caller_id: "control-e2e".to_owned(),
+            timestamp_millis: 1_800_000_000_000,
+        },
+        &world,
+        EvaluationInputs {
+            binding: &binding,
+            visible: &visible,
+            sealed: &sealed,
+            parent: &parent_plan,
+            candidate: &candidate_plan,
+        },
+    )
+    .expect("consume exact daemon-authenticated results in Arena");
+    assert_eq!(recorded.candidate_result().summary.world_id, world.id());
+    assert_eq!(
+        recorded.candidate_result().summary.parent_genome_id,
+        parent.genome_id
+    );
+    assert_eq!(
+        recorded.candidate_result().summary.candidate_genome_id,
+        candidate.genome_id
+    );
+}
+
+fn evaluation_run(data_dir: &Path, genome_id: &str, task_id: &str, input: &str) -> String {
+    let output = cli(
+        data_dir,
+        &[
+            "evaluate",
+            genome_id,
+            "--task-id",
+            task_id,
+            "--input",
+            input,
+            "--seed",
+            "42",
+        ],
+    );
+    let response = response(&output);
+    match response.data.unwrap() {
+        ResponseData::Run { run_id, .. } => format!("result:{run_id}"),
+        other => panic!("unexpected evaluation response: {other:?}"),
+    }
+}
+
+fn compiled_genome_record(
+    name: &str,
+    world: &CompiledWorld,
+    artifacts: &ArtifactStore,
+) -> GenomeRecord {
+    let source = format!(
+        r#"{{"schema_version":1,"name":"{name}","parents":[],"model":{{"provider":"deterministic","family":"v1"}},"authority":{{"workspace_write":false,"network":false}},"artifacts":{{}}}}"#
+    );
+    let genome = compile_genome(
+        &source,
+        SourceFormat::Json,
+        world,
+        &std::collections::BTreeMap::new(),
+        artifacts,
+    )
+    .unwrap();
+    let artifact = artifacts.put(genome.canonical_json()).unwrap();
+    GenomeRecord {
+        genome_id: genome.id().to_owned(),
+        name: genome.name().to_owned(),
+        world_id: world.id().to_owned(),
+        artifact_id: artifact.as_str().to_owned(),
+        parent_ids: vec![],
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
     let directory = tempdir().expect("temporary directory");
     let data_dir = directory.path().join("data");
@@ -109,6 +383,41 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
         ApiErrorCode::InvalidRequest
     );
     assert!(cli(&data_dir, &["unfreeze"]).status.success());
+    let world_cost_violation = cli(
+        &data_dir,
+        &[
+            "evaluate",
+            &genome.genome_id,
+            "--task-id",
+            "world-law-cost",
+            "--input",
+            "cost law input",
+            "--wall-millis",
+            "10000",
+            "--maximum-output-bytes",
+            "1048576",
+            "--maximum-cost-microusd",
+            "1",
+        ],
+    );
+    assert!(!world_cost_violation.status.success());
+    assert_eq!(
+        serde_json::from_slice::<ApiResponse>(&world_cost_violation.stdout)
+            .expect("decode World cost Law response")
+            .error
+            .expect("World cost Law error")
+            .code,
+        ApiErrorCode::InvalidRequest
+    );
+    let pre_run_history = EventStore::open(data_dir.join("events.sqlite3"))
+        .expect("open pre-run ledger")
+        .replay_verified()
+        .expect("verify pre-run history");
+    assert!(pre_run_history.iter().all(|event| {
+        event.event_type != "trace.recorded" && event.event_type != "run.result_recorded"
+    }));
+    assert!(!data_dir.join("sandboxes").exists());
+
     let run = response(&cli(&data_dir, &["run", &genome.genome_id]));
     let (run_id, stdout_artifact_id, stderr_artifact_id, trace_artifact_ids, latency_millis) =
         match run.data.expect("run response") {
@@ -217,11 +526,36 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
         run_events.last().expect("result receipt").event_type,
         "run.result_recorded"
     );
-    let result_receipt: serde_json::Value =
-        serde_json::from_slice(&run_events.last().expect("result receipt").payload)
-            .expect("decode result receipt");
-    assert_eq!(result_receipt["schema_version"], 1);
-    assert_eq!(result_receipt["source_revision"], source_revision);
+    let producer_key_path = data_dir.join("runtime-producer.key");
+    assert_eq!(
+        fs::metadata(&producer_key_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let producer_seed: [u8; 32] = fs::read(producer_key_path).unwrap().try_into().unwrap();
+    let verifier = RunResultSigner::from_seed(producer_seed).verifier();
+    let result_receipt =
+        RunResultReceipt::parse_from_event(run_events.last().expect("result receipt"), &verifier)
+            .expect("authenticate result receipt");
+    assert_eq!(result_receipt.schema_version, 2);
+    assert_eq!(result_receipt.source_revision, source_revision);
+    assert_eq!(result_receipt.task_id, "repository-inventory-v1");
+    assert_eq!(result_receipt.seed, 0);
+    assert_eq!(result_receipt.environment_id, runtime_environment_id());
+    assert_eq!(result_receipt.budget.wall_millis, 10_000);
+    assert_eq!(result_receipt.budget.maximum_output_bytes, 1_048_576);
+    assert_eq!(result_receipt.budget.maximum_cost_microusd, 0);
+    assert_eq!(
+        result_receipt.input_commitment,
+        blake3::hash(
+            b"Inventory the isolated repository without modifying it or using the network."
+        )
+        .to_hex()
+        .to_string()
+    );
     let terminal_artifact = artifacts
         .get(
             &hephaestus_ledger::ArtifactId::parse(
@@ -250,6 +584,12 @@ fn reference_runtime_runs_through_real_daemon_and_replays_terminal_evidence() {
         Some(ResponseData::Replay { active_runs: 0, .. })
     ));
     restarted.stop();
+
+    fs::write(data_dir.join("runtime-producer.key"), [3_u8; 32]).expect("replace producer key");
+    assert!(ControlPlane::open_with_repository(&data_dir, &repository).is_err());
+    fs::remove_file(data_dir.join("runtime-producer.key")).expect("remove producer key");
+    assert!(ControlPlane::open_with_repository(&data_dir, &repository).is_err());
+    assert!(!data_dir.join("runtime-producer.key").exists());
 }
 
 impl Drop for Daemon {

@@ -19,11 +19,16 @@ whatever `--test-cmd` names.
 from __future__ import annotations
 
 import argparse
+import math
+import os
 import pathlib
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from manifest import ManifestError, load, mutations  # noqa: E402
@@ -34,14 +39,123 @@ from manifest import ManifestError, load, mutations  # noqa: E402
 # run well above the honest suite runtime and report the hang as its own class.
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_TEST_COMMAND = "python -m pytest -q -x"
+PROCESS_GROUP_GRACE_SECONDS = 1.0
 
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+class ProcessCleanupError(RuntimeError):
+    """The mutation suite's process tree could not be proven terminated."""
+
+
+def _process_group_members(group_id: int) -> set[int]:
+    """Return live, non-zombie members of one POSIX process group."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,pgid=,stat="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PROCESS_GROUP_GRACE_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ProcessCleanupError("could not inspect mutation process group") from error
+    if result.returncode != 0:
+        raise ProcessCleanupError(
+            f"process-group inspection failed with exit {result.returncode}"
+        )
+    members = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            if fields:
+                raise ProcessCleanupError("process-group inspection was malformed")
+            continue
+        pid, pgid, state = fields[:3]
+        try:
+            parsed_pid = int(pid)
+            parsed_pgid = int(pgid)
+        except ValueError as error:
+            raise ProcessCleanupError("process-group inspection was malformed") from error
+        if parsed_pgid == group_id and not state.startswith("Z"):
+            members.add(parsed_pid)
+    return members
+
+
+def _signal_process_group(group_id: int, sig: signal.Signals) -> None:
+    """Signal a group, falling back to its observed members on host quirks."""
+    try:
+        os.killpg(group_id, sig)
+        return
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        members = _process_group_members(group_id)
+    for pid in members:
+        try:
+            if os.getpgid(pid) != group_id:
+                continue
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _stop_process_group(process: subprocess.Popen) -> None:
+    """Terminate a mutation suite and every descendant before source restoration."""
+    group_id = process.pid
+    _signal_process_group(group_id, signal.SIGTERM)
+    try:
+        process.communicate(timeout=PROCESS_GROUP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    # Always escalate the whole group. The leader and its captured pipes may be
+    # gone while a silent TERM-ignoring descendant remains in the same group.
+    _signal_process_group(group_id, signal.SIGKILL)
+    try:
+        process.communicate(timeout=PROCESS_GROUP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A descendant can escape the group while retaining a captured writer.
+        # Closing our readers prevents cleanup from blocking source restoration.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+    try:
+        process.wait(timeout=PROCESS_GROUP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=PROCESS_GROUP_GRACE_SECONDS)
+
+    deadline = time.monotonic() + PROCESS_GROUP_GRACE_SECONDS
+    while True:
+        if not _process_group_members(group_id):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("mutation process group did not terminate after SIGKILL")
+        time.sleep(0.01)
+
+
 def _run(command: list[str], root: pathlib.Path, timeout: float):
-    return subprocess.run(command, cwd=root, check=False, capture_output=True,
-                          text=True, timeout=timeout)
+    # Text mutations can preserve a source file's size and second-resolution
+    # timestamp. Keep Python from accepting a stale local .pyc after restoration.
+    with tempfile.TemporaryDirectory(prefix="hephaestus-mutation-pycache-") as cache:
+        environment = os.environ.copy()
+        environment["PYTHONPYCACHEPREFIX"] = cache
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException:
+            _stop_process_group(process)
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _tail(output: str, lines: int = 15, width: int = 200) -> str:
@@ -132,8 +246,16 @@ def verify_baseline(root: pathlib.Path, command: list[str], timeout: float) -> s
     return None
 
 
-def mutation_command(entry: dict, data: dict, default: list[str]) -> list[str]:
+def mutation_command(
+    entry: dict,
+    data: dict,
+    default: list[str],
+    *,
+    allow_scoped: bool = True,
+) -> list[str]:
     """Select the narrowest declared suite that owns the mutated source file."""
+    if not allow_scoped:
+        return default
     configured = data.get("mutation_test_commands", {})
     matches = [
         (prefix, command)
@@ -144,6 +266,23 @@ def mutation_command(entry: dict, data: dict, default: list[str]) -> list[str]:
         return default
     _prefix, command = max(matches, key=lambda item: len(item[0]))
     return shlex.split(command)
+
+
+def mutation_timeout(entry: dict, data: dict, default: float) -> float:
+    """Select the narrowest declared timeout that owns the mutated source file."""
+    configured = data.get("mutation_timeout_seconds", {})
+    matches = [
+        (prefix, timeout)
+        for prefix, timeout in configured.items()
+        if entry["file"].startswith(prefix)
+    ]
+    timeout = default if not matches else max(matches, key=lambda item: len(item[0]))[1]
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ManifestError("mutation timeouts must be numbers")
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ManifestError("mutation timeouts must be positive and finite")
+    return timeout
 
 
 def main(argv=None) -> int:
@@ -195,10 +334,35 @@ def main(argv=None) -> int:
         root = root.parent
     command = shlex.split(args.test_cmd or data.get("test_command") or DEFAULT_TEST_COMMAND)
     timeout = args.timeout or data.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS
+    try:
+        entry_timeouts = {
+            entry["id"]: (
+                args.timeout
+                if args.timeout is not None
+                else mutation_timeout(entry, data, timeout)
+            )
+            for entry in entries
+        }
+        entry_commands = {
+            entry["id"]: mutation_command(
+                entry,
+                data,
+                command,
+                allow_scoped=args.test_cmd is None,
+            )
+            for entry in entries
+        }
+    except ManifestError as error:
+        print(f"MANIFEST ERROR: {error}", file=sys.stderr)
+        return 1
 
     print(f"root:    {root}")
-    print(f"suite:   {' '.join(command)}")
-    print(f"timeout: {timeout:.0f}s per run")
+    print(f"suite:   {' '.join(command)}"
+          f" ({'CLI override' if args.test_cmd is not None else 'manifest default'})")
+    selected_timeouts = ", ".join(
+        f"{value:.0f}s" for value in sorted(set(entry_timeouts.values())))
+    print(f"timeout: {timeout:.0f}s default; selected mutation timeout(s): "
+          f"{selected_timeouts}")
     print()
 
     if not args.skip_baseline:
@@ -211,9 +375,16 @@ def main(argv=None) -> int:
     rows = []
     survived = stale = timed_out = 0
     for entry in entries:
+        effective_command = entry_commands[entry["id"]]
+        effective_timeout = entry_timeouts[entry["id"]]
+        print(
+            f"RUN       {entry['id']:32s} command={shlex.join(effective_command)} "
+            f"timeout={effective_timeout:.0f}s",
+            flush=True,
+        )
         try:
             status, detail = apply_mutation(
-                entry, root, mutation_command(entry, data, command), timeout)
+                entry, root, effective_command, effective_timeout)
         except ManifestError as error:
             print(f"MANIFEST ERROR on {entry['id']}: {error}", file=sys.stderr, flush=True)
             return 1
@@ -226,7 +397,8 @@ def main(argv=None) -> int:
         rows.append((entry["id"], entry["file"], status.upper(), detail, entry["invariant"]))
         # Flush per mutation: CI captures stdout through a pipe, so without this
         # a run that dies part way through shows no verdicts at all.
-        print(f"{status.upper():9s} {entry['id']:32s} {entry['file']}", flush=True)
+        print(f"{status.upper():9s} {entry['id']:32s} {entry['file']} "
+              f"(timeout {effective_timeout:.0f}s)", flush=True)
 
     print()
     print(f"{'id':32s} {'file':28s} verdict")

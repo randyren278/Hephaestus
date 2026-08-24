@@ -20,13 +20,14 @@ Hephaestus protects canonical ledger history, Genome and World identity, sealed 
 | Spoofing | A candidate labels itself as the operator and clears freeze | Operator actions require an authority-root-issued proof; caller-supplied role labels are insufficient |
 | Tampering | A candidate edits a World, evaluator, event, or artifact to improve its score | Deny candidate write access; hash-link events; content-address artifacts; verify hashes before use |
 | Repudiation | A worker denies a tool call, denial, cost, or promotion recommendation | Ledger actor, capability, input/output hashes, parent event, and decision receipt |
+| Spoofing | A raw ledger writer fabricates a successful `runtime-plane` result | Daemon-held Ed25519 producer key; World-anchored public verifier; signed full envelope and claims |
 | Information disclosure | A candidate reads sealed tasks, sibling workspaces, credentials, or raw secrets in traces | Separate sandboxes and evaluator identities; no ambient credentials; redact before persistence |
 | Denial of service | Unbounded input, recursion, retries, processes, tokens, or disk exhausts the daemon | Bound request size, concurrency, time, tokens, cost, output, and storage; kill descendants on expiry |
 | Elevation of privilege | A child widens capabilities or reuses an expired token | Parent-subset derivation, scoped opaque tokens, expiry, audience binding, and deny-by-default checks |
 
 ## Current implementation review
 
-The initial capability subset check is fail-closed. The original freeze API accepted a freely constructible role enum; the item-1 implementation replaces that design with a non-loggable opaque operator token matched against canonical state. Transport authentication, token generation, expiry, and request-size enforcement remain mandatory before the daemon exposes an API.
+Capability subset checks are fail-closed, and operator control uses a non-loggable opaque token matched against canonical state. The owner-only daemon transport has bounded requests and expiring run capabilities. Runtime result claims are signed after completion with a separate daemon-only Ed25519 seed; replay and Arena require the anchored verifier, so a forged actor string or raw append is insufficient. This protects against candidate and raw-ledger forgery, not a compromised daemon, stolen key, malicious operator, same-UID/root filesystem access, or wholesale rollback of the data directory without an external checkpoint.
 
 ## Security acceptance
 

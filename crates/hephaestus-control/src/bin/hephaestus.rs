@@ -40,6 +40,22 @@ enum CliCommand {
         /// Content-derived registered Genome identity.
         genome_id: String,
     },
+    /// Execute one registered Genome for a World-bound evaluation task.
+    Evaluate {
+        genome_id: String,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        input: String,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        #[arg(long, default_value_t = 10_000)]
+        wall_millis: u64,
+        #[arg(long, default_value_t = 1_048_576)]
+        maximum_output_bytes: u64,
+        #[arg(long, default_value_t = 0)]
+        maximum_cost_microusd: u64,
+    },
     /// Verify and replay the canonical event stream.
     Replay,
     /// Control the local daemon process.
@@ -89,6 +105,23 @@ fn main() -> ExitCode {
             command: GenomeCommand::Show { genome_id },
         } => Command::GenomeShow { genome_id },
         CliCommand::Run { genome_id } => Command::RunReference { genome_id },
+        CliCommand::Evaluate {
+            genome_id,
+            task_id,
+            input,
+            seed,
+            wall_millis,
+            maximum_output_bytes,
+            maximum_cost_microusd,
+        } => Command::RunEvaluation {
+            genome_id,
+            task_id,
+            input,
+            seed,
+            wall_millis,
+            maximum_output_bytes,
+            maximum_cost_microusd,
+        },
         CliCommand::Replay => Command::Replay,
         CliCommand::Daemon {
             command: DaemonCommand::Stop,

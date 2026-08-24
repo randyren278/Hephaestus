@@ -56,32 +56,47 @@ jobs:
     name: Mutation guard (${{ matrix.scope }})
     needs: deterministic
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          - scope: hephaestus-arena
+            prefix: crates/hephaestus-arena/
+            minimum: 18
+            timeout_minutes: 20
           - scope: hephaestus-core
             prefix: crates/hephaestus-core/
             minimum: 9
+            timeout_minutes: 20
           - scope: hephaestus-ledger
             prefix: crates/hephaestus-ledger/
             minimum: 10
+            timeout_minutes: 20
           - scope: hephaestus-genome
             prefix: crates/hephaestus-genome/
             minimum: 13
+            timeout_minutes: 20
           - scope: hephaestus-control
             prefix: crates/hephaestus-control/
-            minimum: 17
+            minimum: 25
+            timeout_minutes: 60
           - scope: hephaestus-runtime
             prefix: crates/hephaestus-runtime/
-            minimum: 27
+            minimum: 36
+            timeout_minutes: 20
           - scope: hephaestus-experience
             prefix: crates/hephaestus-experience/
-            minimum: 40
+            minimum: 44
+            timeout_minutes: 20
+          - scope: mutation-checks
+            prefix: checks/
+            minimum: 3
+            timeout_minutes: 20
           - scope: python-statistics
             prefix: python/
             minimum: 5
+            timeout_minutes: 20
     steps:
       - uses: actions/checkout@v5
 

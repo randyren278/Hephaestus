@@ -5,9 +5,9 @@ use std::{os::unix::fs::PermissionsExt, time::Instant};
 
 use hephaestus_core::authority::CapabilitySet;
 use hephaestus_runtime::{
-    Budget, DeterministicRuntime, IsolationBackend, IsolationPolicy, Provider, ProviderInvocation,
-    RunSnapshot, RunSpec, RunStatus, RuntimeAdapter, RuntimeError, SandboxManager,
-    SupervisedRuntime,
+    Budget, DeterministicRuntime, ExperimentContext, IsolationBackend, IsolationPolicy, Provider,
+    ProviderInvocation, RunSnapshot, RunSpec, RunStatus, RuntimeAdapter, RuntimeError,
+    SandboxManager, SupervisedRuntime,
 };
 use tempfile::tempdir;
 
@@ -196,6 +196,32 @@ fn run_specs_reject_unresolvable_revisions_at_construction() {
         Budget::new(Duration::from_secs(5), 1_000_000, 0).expect("budget"),
     );
     assert!(matches!(result, Err(RuntimeError::Git(_))));
+}
+
+#[test]
+fn experiment_run_ids_match_the_signed_result_length_contract() {
+    let repository = repository_fixture();
+    let prompt = "bounded experiment input";
+    let experiment = ExperimentContext::new("task", prompt, 7, "environment-v1").unwrap();
+    let build = |run_id: String| {
+        RunSpec::new_for_experiment_at_revision(
+            run_id,
+            "hephaestus:genome:test",
+            "hephaestus:world:test",
+            repository.path(),
+            "HEAD",
+            prompt,
+            CapabilitySet::new(false, false),
+            Budget::new(Duration::from_secs(5), 1_000_000, 0).unwrap(),
+            experiment.clone(),
+        )
+    };
+
+    assert!(build("r".repeat(128)).is_ok());
+    assert!(matches!(
+        build("r".repeat(129)),
+        Err(RuntimeError::InvalidSpec("run_id is not path safe"))
+    ));
 }
 
 #[test]
@@ -599,6 +625,16 @@ fn supervisor_interrupt_waits_for_process_group_termination() {
         }
         thread::sleep(Duration::from_millis(10));
     }
+    if !child_pid_path.is_file() {
+        let snapshot = runtime
+            .snapshot("supervised-interrupt")
+            .expect("snapshot failed child launch");
+        panic!(
+            "child PID was not written; status={:?}, stderr={}",
+            snapshot.status,
+            fs::read_to_string(snapshot.stderr_path).expect("read child stderr")
+        );
+    }
     let child_pid = fs::read_to_string(&child_pid_path)
         .expect("read child PID")
         .trim()
@@ -626,6 +662,108 @@ fn supervisor_interrupt_waits_for_process_group_termination() {
     );
     assert!(runtime.interrupt("missing").is_err());
     assert!(runtime.snapshot("missing").is_err());
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn deterministic_runtime_reports_wall_overrun_instead_of_success() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec_with_budget(
+        "deterministic-wall-overrun",
+        repository.path(),
+        Duration::from_nanos(1),
+        1_000_000,
+    );
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let mut runtime = DeterministicRuntime::default();
+
+    runtime
+        .start(&run_spec, &sandbox, &token)
+        .expect("start deterministic runtime");
+    let snapshot = runtime
+        .snapshot(run_spec.run_id())
+        .expect("snapshot wall overrun");
+
+    assert_eq!(snapshot.status, RunStatus::TimedOut);
+    assert_eq!(
+        snapshot.completion_reason,
+        Some(hephaestus_runtime::CompletionReason::WallBudgetExceeded)
+    );
+    assert!(fs::read(&snapshot.stdout_path).unwrap().is_empty());
+    assert_eq!(
+        fs::read(&snapshot.stderr_path).unwrap(),
+        b"wall budget exceeded\n"
+    );
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn deterministic_runtime_reports_inventory_git_failures() {
+    let repository = repository_fixture();
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec("missing-worktree", repository.path(), 1_000_000, false);
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let worktree = sandbox.worktree().to_owned();
+    let moved_worktree = worktree.with_extension("temporarily-moved");
+    let mut runtime = DeterministicRuntime::default();
+
+    runtime
+        .start(&run_spec, &sandbox, &token)
+        .expect("start deterministic runtime");
+    fs::rename(&worktree, &moved_worktree).expect("temporarily move worktree");
+    let result = runtime.snapshot(run_spec.run_id());
+    fs::rename(&moved_worktree, &worktree).expect("restore worktree");
+
+    assert!(matches!(
+        result,
+        Err(RuntimeError::Git(message)) if message == "tracked-file inventory failed"
+    ));
+    sandbox.cleanup().expect("clean sandbox");
+}
+
+#[test]
+fn deterministic_runtime_skips_tracked_symlinks() {
+    let repository = repository_fixture();
+    std::os::unix::fs::symlink("fixture.txt", repository.path().join("tracked-link"))
+        .expect("create tracked symlink");
+    run_git(repository.path(), &["add", "tracked-link"]);
+    run_git(
+        repository.path(),
+        &[
+            "-c",
+            "user.name=Hephaestus Tests",
+            "-c",
+            "user.email=hephaestus@example.invalid",
+            "commit",
+            "-qm",
+            "tracked symlink",
+        ],
+    );
+    let sandboxes = tempdir().expect("sandbox directory");
+    let manager = SandboxManager::open(sandboxes.path(), Duration::from_secs(30))
+        .expect("open sandbox manager");
+    let run_spec = spec("tracked-symlink", repository.path(), 1_000_000, false);
+    let (sandbox, token) = manager.create(&run_spec).expect("create sandbox");
+    let mut runtime = DeterministicRuntime::default();
+
+    runtime
+        .start(&run_spec, &sandbox, &token)
+        .expect("start deterministic runtime");
+    let snapshot = runtime
+        .snapshot(run_spec.run_id())
+        .expect("snapshot deterministic runtime");
+    let output: serde_json::Value = serde_json::from_slice(
+        &fs::read(&snapshot.stdout_path).expect("read deterministic output"),
+    )
+    .expect("decode deterministic output");
+
+    assert_eq!(output["files"].as_array().unwrap().len(), 1);
+    assert_eq!(output["files"][0]["path"], "fixture.txt");
     sandbox.cleanup().expect("clean sandbox");
 }
 
@@ -689,6 +827,42 @@ fn budgets_and_run_specs_reject_invalid_inputs() {
     assert_eq!(budget.maximum_cost_microusd(), 7);
 
     let repository = repository_fixture();
+    let experiment = ExperimentContext::new("task-1", b"prompt", 42, "linux-arm64-v1")
+        .expect("experiment context");
+    let contextual = RunSpec::new_for_experiment(
+        "paired-run",
+        "genome",
+        "world",
+        repository.path(),
+        "prompt",
+        CapabilitySet::new(false, false),
+        budget,
+        experiment.clone(),
+    )
+    .expect("contextual spec");
+    assert_eq!(contextual.experiment(), &experiment);
+    assert_eq!(contextual.experiment().task_id(), "task-1");
+    assert_eq!(contextual.experiment().seed(), 42);
+    assert_eq!(contextual.experiment().environment_id(), "linux-arm64-v1");
+    assert_eq!(
+        contextual.experiment().input_commitment(),
+        blake3::hash(b"prompt").to_hex().as_str()
+    );
+    assert!(
+        RunSpec::new_for_experiment(
+            "mismatched-input",
+            "genome",
+            "world",
+            repository.path(),
+            "different prompt",
+            CapabilitySet::new(false, false),
+            budget,
+            experiment.clone(),
+        )
+        .is_err()
+    );
+    assert!(ExperimentContext::new("bad task", b"prompt", 0, "env").is_err());
+    assert!(ExperimentContext::new("task", b"prompt", 0, "bad environment").is_err());
     assert!(matches!(
         RunSpec::new(
             "../escape",
@@ -698,6 +872,19 @@ fn budgets_and_run_specs_reject_invalid_inputs() {
             "prompt",
             CapabilitySet::new(false, false),
             budget
+        ),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+    assert!(matches!(
+        RunSpec::new_for_experiment(
+            "../escape",
+            "genome",
+            "world",
+            repository.path(),
+            "prompt",
+            CapabilitySet::new(false, false),
+            budget,
+            experiment,
         ),
         Err(RuntimeError::InvalidSpec(_))
     ));
@@ -792,6 +979,25 @@ fn provider_and_sandbox_setup_reject_invalid_inputs() {
     );
     assert!(matches!(invalid_spec, Err(RuntimeError::Git(_))));
 
+    let vanished_repository = repository_fixture();
+    let vanished_spec = spec(
+        "vanished-before-create",
+        vanished_repository.path(),
+        1000,
+        false,
+    );
+    let vanished_path = vanished_repository.keep();
+    fs::remove_dir_all(vanished_path).expect("remove repository before sandbox creation");
+    assert!(matches!(
+        manager.create(&vanished_spec),
+        Err(RuntimeError::RollbackFailed {
+            operation,
+            git_failed: true,
+            filesystem_failed: false,
+        }) if matches!(*operation, RuntimeError::Git(_))
+    ));
+    assert!(!root.path().join("valid/vanished-before-create").exists());
+
     let removed_repository = repository_fixture();
     let removed_spec = spec("cleanup-failure", removed_repository.path(), 1000, false);
     let (orphaned, _token) = manager
@@ -799,7 +1005,15 @@ fn provider_and_sandbox_setup_reject_invalid_inputs() {
         .expect("create cleanup-failure sandbox");
     let removed_path = removed_repository.keep();
     fs::remove_dir_all(removed_path).expect("remove source repository");
-    assert!(matches!(orphaned.cleanup(), Err(RuntimeError::Git(_))));
+    let orphaned_root = root.path().join("valid/cleanup-failure");
+    assert!(matches!(
+        orphaned.cleanup(),
+        Err(RuntimeError::CleanupFailed {
+            git_failed: true,
+            filesystem_failed: false,
+        })
+    ));
+    assert!(!orphaned_root.exists());
 }
 
 fn repository_fixture() -> tempfile::TempDir {
