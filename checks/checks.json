@@ -1234,6 +1234,27 @@
       "invariant": "Every candidate and evaluator process is constructed through the mandatory offline isolation policy.",
       "find": "        let mut command = self.isolation.worker_command(&invocation, cleanup.path())?;",
       "replace": "        let mut command = std::process::Command::new(invocation.program());\n        command.args(invocation.arguments());\n        command.current_dir(cleanup.path());"
+    },
+    {
+      "id": "arena-manifest-schema-check-bypassed",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Persisted evaluator manifests are accepted only under the supported wire schema.",
+      "find": "        if wire.schema_version != 1 {",
+      "replace": "        if false && wire.schema_version != 1 {"
+    },
+    {
+      "id": "arena-noncanonical-manifest-accepted",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "Rehydrated evaluator manifests must round-trip to the exact canonical bytes committed by the World.",
+      "find": "        if serde_json::to_vec(&manifest)? != bytes {",
+      "replace": "        if false && serde_json::to_vec(&manifest)? != bytes {"
+    },
+    {
+      "id": "arena-operator-task-leaks-expectation",
+      "file": "crates/hephaestus-arena/src/lib.rs",
+      "invariant": "The trusted scheduling view exposes task inputs but never evaluator expectations.",
+      "find": "            .map(|task| OperatorTask {\n                task_id: task.task_id.clone(),\n                input: task.input.clone(),\n            })",
+      "replace": "            .map(|task| OperatorTask {\n                task_id: task.task_id.clone(),\n                input: task.expected_output.clone(),\n            })"
     }
   ]
 }

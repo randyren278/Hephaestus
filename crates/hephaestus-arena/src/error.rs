@@ -15,6 +15,10 @@ pub enum ArenaError {
     DuplicateRunEvent(String),
     /// A manifest has no tasks.
     EmptyManifest,
+    /// A persisted task manifest uses an unsupported wire schema.
+    UnsupportedManifestSchema(u16),
+    /// Parsed manifest bytes do not equal the canonical wire encoding.
+    NonCanonicalManifest,
     /// A manifest, evaluation, or submission exceeds the bounded task count.
     TooManyTasks,
     /// A task or submission contains text exceeding the evaluator boundary.

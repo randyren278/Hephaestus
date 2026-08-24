@@ -39,6 +39,9 @@ flowchart TD
     Signed --> Event
     World --> Verifier[Producer public key]
     Verifier --> Arena
+    World --> Manifests[Canonical visible and sealed manifests]
+    Manifests -->|operator task view without expectations| Daemon
+    Manifests --> Arena
     Runtime --> Sandbox[Pinned private Git worktree]
     Sandbox --> Codex[Codex driver]
     Sandbox --> Claude[Claude driver]
@@ -53,7 +56,7 @@ The authority, domain, compiler, Genome, World, event-store, artifact-store, run
 
 - `crates/hephaestus-core/` — shared trust primitives.
 - `crates/hephaestus-control/` — daemon, versioned local API, and operator CLI.
-- `crates/hephaestus-arena/` — World-bound deterministic paired measurement with sealed receipts.
+- `crates/hephaestus-arena/` — World-bound deterministic paired measurement, strict manifest rehydration, operator-safe task scheduling views, and sealed receipts.
 - `crates/hephaestus-experience/` — redacted traces, runtime evidence integration, and provenance-backed experience.
 - `crates/hephaestus-genome/` — canonical Genome and World compilers.
 - `crates/hephaestus-ledger/` — canonical events and artifacts.

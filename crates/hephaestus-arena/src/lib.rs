@@ -101,7 +101,7 @@ impl EvaluationBinding {
 }
 
 /// Whether a trusted task manifest may be shown to a candidate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     /// Inputs are available before evaluation.
@@ -116,6 +116,15 @@ pub struct CandidateTask {
     /// Stable task identity.
     pub task_id: String,
     /// Input presented to the candidate.
+    pub input: String,
+}
+
+/// Trusted scheduler view of one task, deliberately excluding its expectation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OperatorTask {
+    /// Stable task identity used to bind the signed runtime result.
+    pub task_id: String,
+    /// Exact provider input committed by the runtime.
     pub input: String,
 }
 
@@ -161,6 +170,23 @@ pub struct TrustedManifest {
     tasks: Vec<TrustedTask>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestWire {
+    schema_version: u16,
+    manifest_id: String,
+    visibility: Visibility,
+    tasks: Vec<TaskWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskWire {
+    task_id: String,
+    input: String,
+    expected_output: String,
+}
+
 impl TrustedManifest {
     /// Creates a canonical manifest after sorting tasks by identity.
     ///
@@ -194,6 +220,35 @@ impl TrustedManifest {
         })
     }
 
+    /// Rehydrates exact canonical manifest bytes through all constructor checks.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown fields, unsupported schemas, a visibility mismatch,
+    /// invalid task content, or any non-canonical JSON representation.
+    pub fn from_canonical_bytes(
+        bytes: &[u8],
+        expected_visibility: Visibility,
+    ) -> Result<Self, ArenaError> {
+        let wire: ManifestWire = serde_json::from_slice(bytes)?;
+        if wire.schema_version != 1 {
+            return Err(ArenaError::UnsupportedManifestSchema(wire.schema_version));
+        }
+        if wire.visibility != expected_visibility {
+            return Err(ArenaError::VisibilityMismatch);
+        }
+        let tasks = wire
+            .tasks
+            .into_iter()
+            .map(|task| TrustedTask::new(task.task_id, task.input, task.expected_output))
+            .collect::<Result<Vec<_>, _>>()?;
+        let manifest = Self::new(wire.manifest_id, wire.visibility, tasks)?;
+        if serde_json::to_vec(&manifest)? != bytes {
+            return Err(ArenaError::NonCanonicalManifest);
+        }
+        Ok(manifest)
+    }
+
     /// Returns candidate-safe tasks only for a visible manifest.
     ///
     /// # Errors
@@ -211,6 +266,21 @@ impl TrustedManifest {
                 input: task.input.clone(),
             })
             .collect())
+    }
+
+    /// Returns the trusted daemon scheduling view for visible or sealed tasks.
+    ///
+    /// Expected outputs are structurally absent from the returned type. Callers
+    /// must keep this operator-scoped view outside candidate-facing APIs.
+    #[must_use]
+    pub fn operator_tasks(&self) -> Vec<OperatorTask> {
+        self.tasks
+            .iter()
+            .map(|task| OperatorTask {
+                task_id: task.task_id.clone(),
+                input: task.input.clone(),
+            })
+            .collect()
     }
 }
 
