@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use hephaestus_runtime::{
-    CompletionReason, IsolatedWorker, IsolationPolicy, WorkerDomain, WorkerLimits,
+    CompletionReason, IsolatedWorker, IsolationPolicy, RuntimeError, WorkerDomain, WorkerLimits,
 };
 use tempfile::tempdir;
 
@@ -165,7 +165,7 @@ fn malformed_or_oversized_requests_fail_before_worker_root_creation() {
     let root = tempdir().expect("worker root");
     let worker = IsolatedWorker::open(
         root.path(),
-        IsolationPolicy::detect([]),
+        contract_isolation(),
         WorkerDomain::Candidate,
         "/bin/cat",
         [],
@@ -174,7 +174,12 @@ fn malformed_or_oversized_requests_fail_before_worker_root_creation() {
     .unwrap();
 
     assert!(worker.execute("../escape", b"").is_err());
-    assert!(worker.execute("valid", b"four").is_err());
+    assert!(matches!(
+        worker.execute("valid", b"four"),
+        Err(RuntimeError::InvalidSpec(
+            "worker input exceeds its byte limit"
+        ))
+    ));
     assert!(root.path().read_dir().unwrap().next().is_none());
 }
 
@@ -185,7 +190,7 @@ fn replaced_worker_root_is_rejected_before_launch() {
     let moved = outer.path().join("original-workers");
     let worker = IsolatedWorker::open(
         &root,
-        IsolationPolicy::detect([]),
+        contract_isolation(),
         WorkerDomain::Evaluator,
         "/bin/cat",
         [],
@@ -195,7 +200,10 @@ fn replaced_worker_root_is_rejected_before_launch() {
     std::fs::rename(&root, &moved).unwrap();
     std::fs::create_dir(&root).unwrap();
 
-    assert!(worker.execute("identity-probe", b"").is_err());
+    assert!(matches!(
+        worker.execute("identity-probe", b""),
+        Err(RuntimeError::InvalidSpec("worker root identity changed"))
+    ));
     assert!(root.read_dir().unwrap().next().is_none());
     assert!(moved.read_dir().unwrap().next().is_none());
 }
@@ -236,4 +244,14 @@ fn workers_fail_closed_without_a_verified_backend_and_cleanup() {
     assert!(worker.execute("unavailable", b"").is_err());
     assert!(!marker.exists());
     assert!(root.path().read_dir().unwrap().next().is_none());
+}
+
+#[cfg(feature = "test-support")]
+fn contract_isolation() -> IsolationPolicy {
+    IsolationPolicy::unconfined_for_testing()
+}
+
+#[cfg(not(feature = "test-support"))]
+fn contract_isolation() -> IsolationPolicy {
+    IsolationPolicy::detect([])
 }
