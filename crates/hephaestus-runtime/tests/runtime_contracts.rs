@@ -98,6 +98,10 @@ fn isolated_worktrees_bind_expiring_tokens_to_one_run() {
             policy.command(&sibling_probe, &first),
             Err(RuntimeError::Unsupported(_))
         )),
+        #[cfg(feature = "test-support")]
+        IsolationBackend::TestOnlyUnconfined => {
+            unreachable!("detected production policy cannot select the test-only backend")
+        }
     }
 
     first.cleanup().expect("clean first sandbox");

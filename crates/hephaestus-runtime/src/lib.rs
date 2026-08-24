@@ -8,6 +8,7 @@ mod runtime;
 mod sandbox;
 mod spec;
 mod supervisor;
+mod worker;
 
 pub use deterministic::DeterministicRuntime;
 pub use error::RuntimeError;
@@ -20,3 +21,4 @@ pub use runtime::{
 pub use sandbox::{CapabilityToken, Sandbox, SandboxManager};
 pub use spec::{Budget, ExperimentContext, RunSpec};
 pub use supervisor::SupervisedRuntime;
+pub use worker::{IsolatedWorker, WorkerDomain, WorkerLimits, WorkerOutput};

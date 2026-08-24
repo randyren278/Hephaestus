@@ -10,7 +10,7 @@ pub enum IsolationBackend {
     /// No verified external sandbox exists on this host.
     Unavailable,
     /// Unit-test-only process launcher used to exercise supervisor mechanics.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     TestOnlyUnconfined,
 }
 
@@ -53,7 +53,7 @@ impl IsolationPolicy {
         invocation: &ProviderInvocation,
         sandbox: &Sandbox,
     ) -> Result<Command, RuntimeError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.backend == IsolationBackend::TestOnlyUnconfined {
             let mut command = Command::new(invocation.program());
             command.args(invocation.arguments());
@@ -69,20 +69,59 @@ impl IsolationPolicy {
         Ok(command)
     }
 
+    pub(crate) fn worker_command(
+        &self,
+        invocation: &ProviderInvocation,
+        worker_root: &std::path::Path,
+    ) -> Result<Command, RuntimeError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.backend == IsolationBackend::TestOnlyUnconfined {
+            let mut command = Command::new(invocation.program());
+            command.args(invocation.arguments());
+            command.current_dir(worker_root);
+            return Ok(command);
+        }
+        let mut command = Command::new(self.launcher()?);
+        let profile = build_macos_profile(
+            invocation.program(),
+            worker_root,
+            &self.protected_paths,
+            false,
+        )?;
+        command.args(["-p", &profile]);
+        command.arg(invocation.program());
+        command.args(invocation.arguments());
+        command.current_dir(worker_root);
+        Ok(command)
+    }
+
     fn launcher(&self) -> Result<&'static str, RuntimeError> {
         match self.backend {
             IsolationBackend::MacOsSeatbelt => Ok("/usr/bin/sandbox-exec"),
             IsolationBackend::Unavailable => Err(RuntimeError::Unsupported(
                 "no verified external sandbox backend",
             )),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             IsolationBackend::TestOnlyUnconfined => Err(RuntimeError::Unsupported(
                 "test-only backend has no production launcher",
             )),
         }
     }
 
-    #[cfg(test)]
+    /// Creates an unconfined process policy for contract tests only.
+    ///
+    /// This API does not exist unless the explicitly unsafe `test-support`
+    /// feature is enabled; production callers must use [`Self::detect`].
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn unconfined_for_testing() -> Self {
+        Self {
+            backend: IsolationBackend::TestOnlyUnconfined,
+            protected_paths: Vec::new(),
+        }
+    }
+
+    #[cfg(all(test, not(feature = "test-support")))]
     pub(crate) const fn unconfined_for_testing() -> Self {
         Self {
             backend: IsolationBackend::TestOnlyUnconfined,

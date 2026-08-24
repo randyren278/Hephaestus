@@ -1,14 +1,16 @@
 use std::{
     collections::BTreeMap,
     fs,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
 use hephaestus_arena::{
-    ArenaError, EvaluationBinding, EvaluationInputs, EvaluationStores, OperatorEvaluation,
-    ReceiptContext, TrialPlan, TrustedManifest, TrustedTask, Visibility, evaluate_and_record,
+    ArenaError, EvaluationBinding, EvaluationInputs, EvaluationStores, IsolatedEvaluator,
+    OperatorEvaluation, ReceiptContext, TrialPlan, TrustedManifest, TrustedTask, Visibility,
+    evaluate_and_record,
 };
 use hephaestus_core::authority::CapabilitySet;
 use hephaestus_experience::{
@@ -16,7 +18,7 @@ use hephaestus_experience::{
 };
 use hephaestus_genome::{CompiledWorld, SourceFormat, compile_genome, compile_world};
 use hephaestus_ledger::ArtifactId;
-use hephaestus_runtime::{Budget, ExperimentContext, RunSpec};
+use hephaestus_runtime::{Budget, ExperimentContext, IsolationPolicy, RunSpec, WorkerLimits};
 use tempfile::TempDir;
 
 const VISIBLE_SECRET: &str = "visible-expected-never-in-candidate-input";
@@ -38,6 +40,7 @@ struct Fixture {
     candidate_genome_id: String,
     parent: TrialPlan,
     candidate: TrialPlan,
+    evaluator: IsolatedEvaluator,
     signer: RunResultSigner,
     repository: PathBuf,
     revision: String,
@@ -177,11 +180,14 @@ fn plan(role: &str, replacement: Option<(&str, &str)>) -> TrialPlan {
 }
 
 fn make_fixture(directory: &TempDir) -> Fixture {
-    make_fixture_with_evaluator(directory, b"exact-match-evaluator-v1")
+    make_fixture_with_evaluator(
+        directory,
+        PathBuf::from(env!("CARGO_BIN_EXE_hephaestus-evaluator")),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
-fn make_fixture_with_evaluator(directory: &TempDir, evaluator_bytes: &[u8]) -> Fixture {
+fn make_fixture_with_evaluator(directory: &TempDir, evaluator_path: PathBuf) -> Fixture {
     let mut stores = EvaluationStores::open(
         directory.path().join("events.sqlite3"),
         directory.path().join("blobs"),
@@ -196,7 +202,18 @@ fn make_fixture_with_evaluator(directory: &TempDir, evaluator_bytes: &[u8]) -> F
         .artifacts
         .put(&serde_json::to_vec(&sealed).unwrap())
         .unwrap();
-    let evaluator_id = stores.artifacts.put(evaluator_bytes).unwrap();
+    let evaluator_id = stores
+        .artifacts
+        .put(&fs::read(&evaluator_path).unwrap())
+        .unwrap();
+    let evaluator = IsolatedEvaluator::open_with_policy(
+        directory.path().join("evaluator-runs"),
+        evaluator_path,
+        evaluator_id.as_str(),
+        IsolationPolicy::unconfined_for_testing(),
+        WorkerLimits::new(Duration::from_secs(5), 16 * 1024 * 1024, 64 * 1024).unwrap(),
+    )
+    .unwrap();
     let signer = RunResultSigner::from_seed([7; 32]);
     let verifier_id = stores
         .artifacts
@@ -285,6 +302,7 @@ fn make_fixture_with_evaluator(directory: &TempDir, evaluator_bytes: &[u8]) -> F
         candidate_genome_id: candidate_genome.id().to_owned(),
         parent: plan("parent", None),
         candidate: plan("candidate", None),
+        evaluator,
         signer,
         repository,
         revision,
@@ -380,6 +398,7 @@ fn evaluate(fixture: Fixture) -> Result<OperatorEvaluation, ArenaError> {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     )
 }
@@ -422,6 +441,19 @@ fn records_world_bound_runtime_derived_safe_evaluation() {
         assert!(!public.contains(forbidden));
     }
     let summary_value = serde_json::from_str::<serde_json::Value>(&public).unwrap();
+    let candidate_debug = format!("{recorded:?}");
+    for forbidden in [SEALED_SECRET, "parent_sealed", "candidate_sealed", "hash:"] {
+        assert!(!candidate_debug.contains(forbidden));
+    }
+    assert!(
+        directory
+            .path()
+            .join("evaluator-runs")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none()
+    );
     let keys = summary_value
         .as_object()
         .unwrap()
@@ -530,6 +562,7 @@ fn world_manifest_and_evaluator_semantics_fail_before_publication() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(
@@ -538,14 +571,57 @@ fn world_manifest_and_evaluator_semantics_fail_before_publication() {
     ));
     assert_eq!(artifact_file_count(&directory), before);
 
+    let evaluator_path = PathBuf::from(env!("CARGO_BIN_EXE_hephaestus-evaluator"));
+    let wrong_id = ArtifactId::for_bytes(b"unimplemented-evaluator-v2");
+    assert!(matches!(
+        IsolatedEvaluator::open_with_policy(
+            directory.path().join("wrong-evaluator"),
+            evaluator_path,
+            wrong_id.as_str(),
+            IsolationPolicy::unconfined_for_testing(),
+            WorkerLimits::new(Duration::from_secs(1), 1024, 1024).unwrap(),
+        ),
+        Err(ArenaError::WorldArtifactMismatch("arena.evaluator"))
+    ));
+}
+
+#[test]
+fn isolated_evaluator_response_must_bind_the_exact_request() {
     let directory = TempDir::new().unwrap();
-    let fixture = make_fixture_with_evaluator(&directory, b"unimplemented-evaluator-v2");
+    let evaluator_path = directory.path().join("binding-forger");
+    fs::write(
+        &evaluator_path,
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s' '",
+            "{\"schema_version\":1,\"request_artifact_id\":\"",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "\",\"scores\":{\"parent_visible_correct\":0,",
+            "\"candidate_visible_correct\":0,\"parent_sealed_correct\":0,",
+            "\"candidate_sealed_correct\":0,\"regressions\":0,",
+            "\"improvements\":0,\"visible_total\":2,\"sealed_total\":2}}'\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&evaluator_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = make_fixture_with_evaluator(&directory, evaluator_path);
     let before = artifact_file_count(&directory);
     assert!(matches!(
         evaluate(fixture),
-        Err(ArenaError::UnsupportedEvaluator)
+        Err(ArenaError::EvaluatorProtocol(
+            "response request binding mismatch"
+        ))
     ));
     assert_eq!(artifact_file_count(&directory), before);
+    assert!(
+        directory
+            .path()
+            .join("evaluator-runs")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -585,6 +661,7 @@ fn unknown_and_forged_events_fail_without_writes() {
             sealed: &fixture.sealed,
             parent: &unknown,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::UnknownRunEvent(_))));
@@ -618,6 +695,7 @@ fn unknown_and_forged_events_fail_without_writes() {
             sealed: &fixture.sealed,
             parent: &forged,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     match result {
@@ -703,6 +781,7 @@ fn signed_results_cannot_be_relabelled_or_cross_experiment_boundaries() {
                 sealed: &fixture.sealed,
                 parent: &plan,
                 candidate: &fixture.candidate,
+                evaluator: &fixture.evaluator,
             },
         );
         assert!(
@@ -746,6 +825,7 @@ fn failed_run_and_cross_world_are_rejected() {
             sealed: &fixture.sealed,
             parent: &failed_plan,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::RunNotSuccessful(_))));
@@ -778,6 +858,7 @@ fn failed_run_and_cross_world_are_rejected() {
             sealed: &fixture.sealed,
             parent: &cross_plan,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::RunWorldMismatch(_))));
@@ -850,6 +931,7 @@ fn corrupt_or_missing_output_is_rejected_without_evaluation_writes() {
             sealed: &fixture.sealed,
             parent: &missing,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::Ledger(_))));
@@ -874,6 +956,7 @@ fn mixed_genome_revision_and_task_set_mismatches_are_rejected() {
             sealed: &fixture.sealed,
             parent: &mixed,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::MixedSubmissionGenome)));
@@ -906,6 +989,7 @@ fn mixed_genome_revision_and_task_set_mismatches_are_rejected() {
             sealed: &fixture.sealed,
             parent: &changed_plan,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(
@@ -929,6 +1013,7 @@ fn mixed_genome_revision_and_task_set_mismatches_are_rejected() {
             sealed: &fixture.sealed,
             parent: &incomplete,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::TaskSetMismatch { .. })));
@@ -948,6 +1033,7 @@ fn identical_retry_returns_existing_event_after_reopen() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     )
     .unwrap();
@@ -967,6 +1053,7 @@ fn identical_retry_returns_existing_event_after_reopen() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     )
     .unwrap();
@@ -1001,6 +1088,7 @@ fn wrong_event_identity_and_conflicting_retry_fail_before_writes() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(
@@ -1040,6 +1128,7 @@ fn wrong_event_identity_and_conflicting_retry_fail_before_writes() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &fixture.candidate,
+            evaluator: &fixture.evaluator,
         },
     )
     .unwrap();
@@ -1054,6 +1143,7 @@ fn wrong_event_identity_and_conflicting_retry_fail_before_writes() {
             sealed: &fixture.sealed,
             parent: &fixture.parent,
             candidate: &alternate,
+            evaluator: &fixture.evaluator,
         },
     );
     assert!(matches!(result, Err(ArenaError::EvaluationConflict(_))));

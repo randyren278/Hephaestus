@@ -10,8 +10,8 @@ use std::{
 };
 
 use hephaestus_arena::{
-    EvaluationBinding, EvaluationInputs, EvaluationStores, ReceiptContext, TrialPlan,
-    TrustedManifest, TrustedTask, Visibility, evaluate_and_record,
+    EvaluationBinding, EvaluationInputs, EvaluationStores, IsolatedEvaluator, ReceiptContext,
+    TrialPlan, TrustedManifest, TrustedTask, Visibility, evaluate_and_record,
 };
 use hephaestus_control::{
     API_VERSION, ApiErrorCode, ApiRequest, ApiResponse, Command, ControlError, ControlPlane,
@@ -270,6 +270,7 @@ fn daemon_evaluation_results_replay_and_feed_exact_authenticated_arena_events() 
     .unwrap();
     let parent_plan = TrialPlan::new(parent_trials).unwrap();
     let candidate_plan = TrialPlan::new(candidate_trials).unwrap();
+    let evaluator = IsolatedEvaluator::in_process_for_testing(evaluator_id.as_str()).unwrap();
     let recorded = evaluate_and_record(
         EvaluationStores::open(data_dir.join("events.sqlite3"), data_dir.join("blobs")).unwrap(),
         ReceiptContext {
@@ -285,6 +286,7 @@ fn daemon_evaluation_results_replay_and_feed_exact_authenticated_arena_events() 
             sealed: &sealed,
             parent: &parent_plan,
             candidate: &candidate_plan,
+            evaluator: &evaluator,
         },
     )
     .expect("consume exact daemon-authenticated results in Arena");

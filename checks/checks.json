@@ -1,23 +1,27 @@
 {
-  "test_command": "cargo test --workspace --quiet",
+  "test_command": "cargo test --workspace --all-features --quiet",
   "mutation_test_commands": {
     "checks/": "env PYTHONPATH=python python3 -m unittest python.tests.test_mutation_guard -v",
-    "crates/hephaestus-arena/": "cargo test -p hephaestus-arena --quiet",
+    "crates/hephaestus-arena/": "cargo test -p hephaestus-arena --all-features --quiet",
     "crates/hephaestus-control/": "cargo test -p hephaestus-control --quiet",
     "crates/hephaestus-core/": "cargo test -p hephaestus-core --quiet",
     "crates/hephaestus-experience/": "cargo test -p hephaestus-experience --quiet",
     "crates/hephaestus-genome/": "cargo test -p hephaestus-genome --quiet",
     "crates/hephaestus-ledger/": "cargo test -p hephaestus-ledger --quiet",
-    "crates/hephaestus-runtime/": "cargo test -p hephaestus-runtime --quiet",
+    "crates/hephaestus-runtime/": "cargo test -p hephaestus-runtime --all-features --quiet",
     "python/": "env PYTHONPATH=python python3 -m unittest discover -s python/tests -v"
   },
   "timeout_seconds": 120,
   "mutation_timeout_seconds": {
-    "crates/hephaestus-control/": 240
+    "crates/hephaestus-arena/": 240,
+    "crates/hephaestus-control/": 240,
+    "crates/hephaestus-runtime/": 240
   },
   "coverage_floor": 95.0,
   "critical_modules": [
     "crates/hephaestus-arena/src/lib.rs",
+    "crates/hephaestus-arena/src/evaluator_protocol.rs",
+    "crates/hephaestus-arena/src/isolated_evaluator.rs",
     "crates/hephaestus-core/src/authority.rs",
     "crates/hephaestus-core/src/domain.rs",
     "crates/hephaestus-control/src/client.rs",
@@ -37,7 +41,8 @@
     "crates/hephaestus-runtime/src/provider.rs",
     "crates/hephaestus-runtime/src/sandbox.rs",
     "crates/hephaestus-runtime/src/spec.rs",
-    "crates/hephaestus-runtime/src/supervisor.rs"
+    "crates/hephaestus-runtime/src/supervisor.rs",
+    "crates/hephaestus-runtime/src/worker.rs"
   ],
   "mutations": [
     {
@@ -909,11 +914,25 @@
       "replace": ""
     },
     {
-      "id": "arena-evaluator-semantics-ignored",
+      "id": "arena-evaluator-executable-unbound",
+      "file": "crates/hephaestus-arena/src/isolated_evaluator.rs",
+      "invariant": "The evaluator process executable bytes exactly match the evaluator artifact committed by the World.",
+      "find": "    if ArtifactId::for_bytes(&bytes) != expected {",
+      "replace": "    if false && ArtifactId::for_bytes(&bytes) != expected {"
+    },
+    {
+      "id": "arena-evaluator-response-replay-accepted",
+      "file": "crates/hephaestus-arena/src/isolated_evaluator.rs",
+      "invariant": "An isolated evaluator response is accepted only for the exact canonical request it consumed.",
+      "find": "    if response.request_artifact_id != ArtifactId::for_bytes(request_bytes).as_str() {",
+      "replace": "    if false && response.request_artifact_id != ArtifactId::for_bytes(request_bytes).as_str() {"
+    },
+    {
+      "id": "arena-isolated-evaluator-bypassed",
       "file": "crates/hephaestus-arena/src/lib.rs",
-      "invariant": "The World-bound evaluator bytes select the exact scoring semantics implemented by Arena.",
-      "find": "    if artifacts.get(&ArtifactId::parse(evaluator_id)?)? != EXACT_MATCH_EVALUATOR {",
-      "replace": "    if false && artifacts.get(&ArtifactId::parse(evaluator_id)?)? != EXACT_MATCH_EVALUATOR {"
+      "invariant": "Arena scoring crosses the isolated evaluator process boundary instead of reading expectations in the daemon process.",
+      "find": "    Ok(evaluator.evaluate(evaluation_id, &request)?.scores.into())",
+      "replace": "    Ok(crate::evaluator_protocol::evaluate_request(&serde_json::to_vec(&request)?)\n        .and_then(|bytes| Ok(serde_json::from_slice::<crate::evaluator_protocol::EvaluatorResponse>(&bytes)?))?\n        .scores\n        .into())"
     },
     {
       "id": "arena-failed-run-scored",
@@ -1180,6 +1199,41 @@
       "invariant": "Sandbox cleanup reports a Git metadata cleanup failure even when filesystem removal succeeds.",
       "find": "    if git_failed || filesystem_failed {",
       "replace": "    if filesystem_failed {"
+    },
+    {
+      "id": "worker-input-limit-bypassed",
+      "file": "crates/hephaestus-runtime/src/worker.rs",
+      "invariant": "An isolated worker rejects oversized IPC before creating its private execution root.",
+      "find": "        if input.len() > self.limits.maximum_input_bytes {",
+      "replace": "        if false && input.len() > self.limits.maximum_input_bytes {"
+    },
+    {
+      "id": "worker-root-replacement-accepted",
+      "file": "crates/hephaestus-runtime/src/worker.rs",
+      "invariant": "Worker execution rejects a private-root path whose directory identity changed after open.",
+      "find": "        self.validate_root()?;",
+      "replace": "        // Replaced worker root incorrectly accepted."
+    },
+    {
+      "id": "worker-drop-cleanup-disabled",
+      "file": "crates/hephaestus-runtime/src/worker.rs",
+      "invariant": "Worker launch and isolation failures remove the armed private execution root through RAII cleanup.",
+      "find": "        if let Some(path) = self.path.take() {\n            let _ = fs::remove_dir_all(path);\n        }",
+      "replace": "        self.path.take();"
+    },
+    {
+      "id": "worker-domains-share-root",
+      "file": "crates/hephaestus-runtime/src/worker.rs",
+      "invariant": "Candidate and evaluator requests receive distinctly named private execution environments.",
+      "find": "            Self::Candidate => \"candidate\",",
+      "replace": "            Self::Candidate => \"evaluator\","
+    },
+    {
+      "id": "worker-isolation-policy-bypassed",
+      "file": "crates/hephaestus-runtime/src/worker.rs",
+      "invariant": "Every candidate and evaluator process is constructed through the mandatory offline isolation policy.",
+      "find": "        let mut command = self.isolation.worker_command(&invocation, cleanup.path())?;",
+      "replace": "        let mut command = std::process::Command::new(invocation.program());\n        command.args(invocation.arguments());\n        command.current_dir(cleanup.path());"
     }
   ]
 }

@@ -1,6 +1,9 @@
 //! Trusted deterministic evaluation with sealed task boundaries and durable receipts.
 
 mod error;
+#[doc(hidden)]
+pub mod evaluator_protocol;
+mod isolated_evaluator;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,7 +13,10 @@ use hephaestus_experience::{
 };
 use hephaestus_genome::CompiledWorld;
 use hephaestus_ledger::{ArtifactId, ArtifactStore, EventInput, EventStore, StoredEvent};
+pub use isolated_evaluator::IsolatedEvaluator;
 use serde::{Deserialize, Serialize};
+
+use crate::evaluator_protocol::{EvaluatorRequest, EvaluatorScores, EvaluatorTrial};
 
 const EVENT_TYPE: &str = "evaluation.recorded";
 const EVENT_ACTOR: &str = "arena-plane";
@@ -18,7 +24,6 @@ const VISIBLE_MANIFEST_KEY: &str = "arena.visible_manifest";
 const SEALED_MANIFEST_KEY: &str = "arena.sealed_manifest";
 const EVALUATOR_KEY: &str = "arena.evaluator";
 const RUN_RESULT_VERIFIER_KEY: &str = "arena.runtime_verifier";
-const EXACT_MATCH_EVALUATOR: &[u8] = b"exact-match-evaluator-v1";
 const MAX_TASKS: usize = 1_000;
 const MAX_TASK_TEXT_BYTES: usize = 64 * 1024;
 const MAX_SUBMISSION_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -318,6 +323,21 @@ impl From<&OperatorScores> for EvaluationScores {
     }
 }
 
+impl From<EvaluatorScores> for OperatorScores {
+    fn from(scores: EvaluatorScores) -> Self {
+        Self {
+            parent_visible_correct: scores.parent_visible_correct,
+            candidate_visible_correct: scores.candidate_visible_correct,
+            parent_sealed_correct: scores.parent_sealed_correct,
+            candidate_sealed_correct: scores.candidate_sealed_correct,
+            regressions: scores.regressions,
+            improvements: scores.improvements,
+            visible_total: scores.visible_total,
+            sealed_total: scores.sealed_total,
+        }
+    }
+}
+
 /// Candidate-safe, visible-only evaluation result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -409,8 +429,6 @@ pub struct EvaluationEvent {
     pub actor: String,
     /// Caller-observed time.
     pub timestamp_millis: i64,
-    /// Tamper-evident event hash.
-    pub hash: [u8; 32],
 }
 
 impl From<&StoredEvent> for EvaluationEvent {
@@ -422,7 +440,6 @@ impl From<&StoredEvent> for EvaluationEvent {
             event_type: event.event_type.clone(),
             actor: event.actor.clone(),
             timestamp_millis: event.timestamp_millis,
-            hash: event.hash,
         }
     }
 }
@@ -531,6 +548,8 @@ pub struct EvaluationInputs<'a> {
     pub parent: &'a TrialPlan,
     /// Proposed replacement task-to-runtime-event plan.
     pub candidate: &'a TrialPlan,
+    /// Process-backed trusted evaluator isolated from candidate execution and stores.
+    pub evaluator: &'a IsolatedEvaluator,
 }
 
 #[derive(Serialize)]
@@ -595,6 +614,7 @@ impl PreparedArtifacts {
 /// # Errors
 ///
 /// Fails closed on provenance, manifest, task-set, serialization, or storage errors.
+#[allow(clippy::too_many_lines)]
 pub fn evaluate_and_record(
     mut owned_stores: EvaluationStores,
     context: ReceiptContext,
@@ -607,6 +627,7 @@ pub fn evaluate_and_record(
         sealed,
         parent,
         candidate,
+        evaluator,
     } = inputs;
     context.validate()?;
     let task_inputs = validate_evaluation_inputs(world, binding, visible, sealed)?;
@@ -625,7 +646,15 @@ pub fn evaluate_and_record(
 
     let prepared = prepare_artifacts(visible, sealed, &parent, &candidate)?;
 
-    let aggregate = score(visible, sealed, &parent, &candidate)?;
+    let aggregate = score_isolated(
+        evaluator,
+        &context.evaluation_id,
+        binding,
+        visible,
+        sealed,
+        &parent,
+        &candidate,
+    )?;
     let summary = EvaluationSummary {
         schema_version: 1,
         evaluation_id: context.evaluation_id.clone(),
@@ -788,9 +817,7 @@ fn validate_world_evaluator_artifacts(
     if evaluator_id != binding.evaluator_id {
         return Err(ArenaError::WorldArtifactMismatch(EVALUATOR_KEY));
     }
-    if artifacts.get(&ArtifactId::parse(evaluator_id)?)? != EXACT_MATCH_EVALUATOR {
-        return Err(ArenaError::UnsupportedEvaluator);
-    }
+    artifacts.get(&ArtifactId::parse(evaluator_id)?)?;
     Ok(())
 }
 
@@ -1019,43 +1046,35 @@ fn verify_world_artifact(
     Ok(())
 }
 
-fn score(
+fn score_isolated(
+    evaluator: &IsolatedEvaluator,
+    evaluation_id: &str,
+    binding: &EvaluationBinding,
     visible: &TrustedManifest,
     sealed: &TrustedManifest,
     parent: &ResolvedSubmission,
     candidate: &ResolvedSubmission,
 ) -> Result<OperatorScores, ArenaError> {
-    let visible_total = u32::try_from(visible.tasks.len()).map_err(|_| ArenaError::TooManyTasks)?;
-    let sealed_total = u32::try_from(sealed.tasks.len()).map_err(|_| ArenaError::TooManyTasks)?;
-    let mut scores = OperatorScores {
-        parent_visible_correct: 0,
-        candidate_visible_correct: 0,
-        parent_sealed_correct: 0,
-        candidate_sealed_correct: 0,
-        regressions: 0,
-        improvements: 0,
-        visible_total,
-        sealed_total,
+    let make_trials = |manifest: &TrustedManifest| {
+        manifest
+            .tasks
+            .iter()
+            .map(|task| EvaluatorTrial {
+                task_id: task.task_id.clone(),
+                expected_output: task.expected_output.clone(),
+                parent_output: parent.outputs[&task.task_id].clone(),
+                candidate_output: candidate.outputs[&task.task_id].clone(),
+            })
+            .collect()
     };
-    for manifest in [visible, sealed] {
-        for task in &manifest.tasks {
-            let parent_correct = parent.outputs[&task.task_id] == task.expected_output;
-            let candidate_correct = candidate.outputs[&task.task_id] == task.expected_output;
-            match manifest.visibility {
-                Visibility::Visible => {
-                    scores.parent_visible_correct += u32::from(parent_correct);
-                    scores.candidate_visible_correct += u32::from(candidate_correct);
-                }
-                Visibility::Sealed => {
-                    scores.parent_sealed_correct += u32::from(parent_correct);
-                    scores.candidate_sealed_correct += u32::from(candidate_correct);
-                }
-            }
-            scores.regressions += u32::from(parent_correct && !candidate_correct);
-            scores.improvements += u32::from(!parent_correct && candidate_correct);
-        }
-    }
-    Ok(scores)
+    let request = EvaluatorRequest {
+        schema_version: 1,
+        evaluation_id: evaluation_id.to_owned(),
+        evaluator_id: binding.evaluator_id.clone(),
+        visible: make_trials(visible),
+        sealed: make_trials(sealed),
+    };
+    Ok(evaluator.evaluate(evaluation_id, &request)?.scores.into())
 }
 
 fn validate_world_id(value: &str) -> Result<(), ArenaError> {

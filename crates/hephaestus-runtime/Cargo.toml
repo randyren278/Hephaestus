@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 blake3 = "1"
 hephaestus-core = { path = "../hephaestus-core" }

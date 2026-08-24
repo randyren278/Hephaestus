@@ -2,6 +2,7 @@ use std::{error::Error, fmt};
 
 use hephaestus_experience::ExperienceError;
 use hephaestus_ledger::LedgerError;
+use hephaestus_runtime::RuntimeError;
 
 /// Fail-closed evaluation and persistence errors.
 #[derive(Debug)]
@@ -30,6 +31,12 @@ pub enum ArenaError {
     WorldArtifactMismatch(&'static str),
     /// The configured evaluator does not implement the scoring semantics used here.
     UnsupportedEvaluator,
+    /// The isolated evaluator request or response violated its strict protocol.
+    EvaluatorProtocol(&'static str),
+    /// The isolated evaluator process failed or could not be trusted.
+    EvaluatorExecution(String),
+    /// The evaluator worker runtime failed closed.
+    Runtime(RuntimeError),
     /// A manifest was supplied in the wrong visibility slot.
     VisibilityMismatch,
     /// A submission is missing or adds task identifiers.
@@ -56,6 +63,8 @@ pub enum ArenaError {
     Ledger(LedgerError),
     /// Canonical JSON encoding failed.
     Serialization(serde_json::Error),
+    /// Evaluator executable inspection failed.
+    Io(std::io::Error),
 }
 
 impl fmt::Display for ArenaError {
@@ -69,7 +78,9 @@ impl Error for ArenaError {
         match self {
             Self::Ledger(error) => Some(error),
             Self::RunReceipt(error) => Some(error),
+            Self::Runtime(error) => Some(error),
             Self::Serialization(error) => Some(error),
+            Self::Io(error) => Some(error),
             _ => None,
         }
     }
@@ -90,5 +101,17 @@ impl From<serde_json::Error> for ArenaError {
 impl From<ExperienceError> for ArenaError {
     fn from(error: ExperienceError) -> Self {
         Self::RunReceipt(error)
+    }
+}
+
+impl From<RuntimeError> for ArenaError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<std::io::Error> for ArenaError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }

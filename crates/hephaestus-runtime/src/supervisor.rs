@@ -55,6 +55,12 @@ struct ObservedRun {
     elapsed: Duration,
 }
 
+pub(crate) struct ProcessOutput {
+    pub(crate) completion_reason: CompletionReason,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) elapsed: Duration,
+}
+
 #[derive(Clone, Copy)]
 enum StopReason {
     Interrupted,
@@ -268,6 +274,79 @@ fn spawn_stdin_writer(
         if stdin.write_all(&bytes).is_err() {
             shared.io_failed.store(true, Ordering::Release);
         }
+    })
+}
+
+pub(crate) fn execute_supervised_process(
+    mut command: Command,
+    stdin: Vec<u8>,
+    stdout_path: &std::path::Path,
+    stderr_path: &std::path::Path,
+    wall: Duration,
+    maximum_output_bytes: usize,
+) -> Result<ProcessOutput, RuntimeError> {
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(wall)
+        .ok_or(RuntimeError::InvalidSpec("wall budget exceeds clock range"))?;
+    let stdout_file = File::create(stdout_path)?;
+    let stderr_file = File::create(stderr_path)?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn()?;
+    let child_stdin = child
+        .stdin
+        .take()
+        .ok_or(RuntimeError::InvalidSpec("child stdin was not piped"))?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or(RuntimeError::InvalidSpec("child stdout was not piped"))?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or(RuntimeError::InvalidSpec("child stderr was not piped"))?;
+    let shared = Arc::new(SharedRun {
+        observed: Mutex::new(ObservedRun {
+            status: RunStatus::Running,
+            exit_code: None,
+            completion_reason: None,
+            elapsed: Duration::ZERO,
+        }),
+        changed: Condvar::new(),
+        interrupt: AtomicBool::new(false),
+        output_exceeded: AtomicBool::new(false),
+        io_failed: AtomicBool::new(false),
+    });
+    let stdin_writer = spawn_stdin_writer(child_stdin, stdin, Arc::clone(&shared));
+    spawn_monitor(
+        child,
+        child_stdout,
+        child_stderr,
+        stdout_file,
+        stderr_file,
+        maximum_output_bytes,
+        deadline,
+        started,
+        stdin_writer,
+        Arc::clone(&shared),
+    );
+    let mut observed = shared.observed.lock().expect("run state lock poisoned");
+    while observed.status == RunStatus::Running {
+        observed = shared
+            .changed
+            .wait(observed)
+            .expect("run state lock poisoned");
+    }
+    Ok(ProcessOutput {
+        completion_reason: observed.completion_reason.ok_or(RuntimeError::InvalidSpec(
+            "worker completion reason is missing",
+        ))?,
+        exit_code: observed.exit_code,
+        elapsed: observed.elapsed,
     })
 }
 
